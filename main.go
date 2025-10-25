@@ -69,7 +69,7 @@ type Frame struct {
 }
 
 type Point struct {
-	Lat, Lon, Ele, Speed, Slope, Distance float64
+	Lat, Lon, Ele, Speed, Slope, Distance, SmoothedSlope float64
 	Timestamp     time.Time
 }
 
@@ -255,6 +255,29 @@ func preprocessGpxPoints(points []Point) []Point {
 		}
 	}
 
+	// --- Smoothed Slope Calculation (5-second moving average) ---
+	for i := 0; i < len(smoothed); i++ {
+		start := i - 4
+		if start < 0 {
+			start = 0
+		}
+
+		var totalSlope float64
+		count := 0
+		for j := start; j <= i; j++ {
+			totalSlope += smoothed[j].Slope
+			count++
+		}
+
+		if count > 0 {
+			smoothed[i].SmoothedSlope = totalSlope / float64(count)
+		} else if i > 0 {
+			smoothed[i].SmoothedSlope = smoothed[i-1].SmoothedSlope
+		} else {
+			smoothed[i].SmoothedSlope = 0
+		}
+	}
+
 	return smoothed
 }
 
@@ -380,7 +403,7 @@ func main() {
     if args.DebugSlope {
         for i := 1; i < len(track.SmoothedPoints); i++ {
 			p := track.SmoothedPoints[i]
-			fmt.Printf("Point %d: Speed: %.2f km/h, Slope: %.2f%%\n", i, p.Speed, p.Slope)
+			fmt.Printf("Point %d: Speed: %.2f km/h, Slope: %.2f%%, SmoothedSlope: %.2f%%\n", i, p.Speed, p.Slope, p.SmoothedSlope)
         }
         return
     }
@@ -604,6 +627,8 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	startTime := track.Points[0].Timestamp
 	timeOffset := float64(frameNum) / args.Framerate
 	currentPoint := findPointForTime(timeOffset, startTime, track.SmoothedPoints)
+	fiveSecondIntervalStartOffset := math.Floor(timeOffset/5.0) * 5.0
+	slopeDisplayPoint := findPointForTime(fiveSecondIntervalStartOffset, startTime, track.SmoothedPoints)
 
 	// --- Calculations ---
 	pathSoFar := []Point{}
@@ -613,7 +638,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	pathSoFar = append(pathSoFar, currentPoint)
 
 	speed := currentPoint.Speed
-	slope := currentPoint.Slope
+	slope := slopeDisplayPoint.SmoothedSlope
 	currentDistance := currentPoint.Distance
 
 	// --- Map Rendering ---
@@ -813,6 +838,7 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 				Ele: p1.Ele + (p2.Ele-p1.Ele)*ratio,
 				Speed: p1.Speed + (p2.Speed-p1.Speed)*derivedCalcRatio,
 				Slope: p1.Slope + (p2.Slope-p1.Slope)*derivedCalcRatio,
+				SmoothedSlope: p1.SmoothedSlope + (p2.SmoothedSlope - p1.SmoothedSlope)*derivedCalcRatio,
 				Distance: p1.Distance + (p2.Distance-p1.Distance)*derivedCalcRatio,
 				Timestamp: targetTime,
 			}
