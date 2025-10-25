@@ -212,21 +212,37 @@ func preprocessGpxPoints(points []Point) []Point {
 
 	for i := 1; i < len(smoothed); i++ {
 		smoothed[i].Distance = smoothed[i-1].Distance + haversine(smoothed[i-1], smoothed[i])
-		p1 := smoothed[i-1]
-		p2 := smoothed[i]
-		distDelta := haversine(p1, p2)
-		timeDelta := p2.Timestamp.Sub(p1.Timestamp).Seconds()
-		if timeDelta > 0 {
-			smoothed[i].Speed = (distDelta * 3600) / timeDelta
+
+		// Speed calculation (moving average over 5 points)
+		start := i - 4
+		if start < 0 {
+			start = 0
+		}
+		var totalDist float64
+		var totalTime float64
+		for j := start; j < i; j++ {
+			totalDist += haversine(smoothed[j], smoothed[j+1])
+			totalTime += smoothed[j+1].Timestamp.Sub(smoothed[j].Timestamp).Seconds()
+		}
+		if totalTime > 0 {
+			smoothed[i].Speed = (totalDist * 3600) / totalTime
 		}
 
 		if i > slopeCalculationPoints {
-			p1_slope := smoothed[i-slopeCalculationPoints]
-			p2_slope := smoothed[i]
-			horizDist := haversine(p1_slope, p2_slope) * 1000
-			eleDelta := p2_slope.Ele - p1_slope.Ele
-			if horizDist > 0 {
-				smoothed[i].Slope = (eleDelta / horizDist) * 100
+			var totalSlope float64
+			var numSlopes int
+			for j := i - slopeCalculationPoints; j < i; j++ {
+				p1_slope := smoothed[j]
+				p2_slope := smoothed[j+1]
+				horizDist := haversine(p1_slope, p2_slope) * 1000
+				eleDelta := p2_slope.Ele - p1_slope.Ele
+				if horizDist > 0 {
+					totalSlope += (eleDelta / horizDist) * 100
+					numSlopes++
+				}
+			}
+			if numSlopes > 0 {
+				smoothed[i].Slope = totalSlope / float64(numSlopes)
 			}
 		}
 	}
@@ -740,13 +756,17 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 				return p1
 			}
 			ratio := targetTime.Sub(p1.Timestamp).Seconds() / timeDiff
+			derivedCalcRatio := ratio
+			if timeDiff < 2.0 { // между точками малый интервал
+				derivedCalcRatio = 0
+			}
 			return Point{
 				Lat: p1.Lat + (p2.Lat-p1.Lat)*ratio,
 				Lon: p1.Lon + (p2.Lon-p1.Lon)*ratio,
 				Ele: p1.Ele + (p2.Ele-p1.Ele)*ratio,
-				Speed: p1.Speed + (p2.Speed-p1.Speed)*ratio,
-				Slope: p1.Slope + (p2.Slope-p1.Slope)*ratio,
-				Distance: p1.Distance + (p2.Distance-p1.Distance)*ratio,
+				Speed: p1.Speed + (p2.Speed-p1.Speed)*derivedCalcRatio,
+				Slope: p1.Slope + (p2.Slope-p1.Slope)*derivedCalcRatio,
+				Distance: p1.Distance + (p2.Distance-p1.Distance)*derivedCalcRatio,
 				Timestamp: targetTime,
 			}
 		}
