@@ -23,7 +23,7 @@ import (
 	"github.com/golang/freetype/truetype"
 	"github.com/schollz/progressbar/v3"
 	"github.com/tkrajina/gpxgo/gpx"
-	"golang.org/x/image/font"
+	_ "golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/goregular"
 )
 
@@ -110,11 +110,13 @@ func parseArguments() *Arguments {
 	flag.StringVar(&indicatorColorStr, "indicator-color", "#FFFFFF", "Color of the text indicators (hex).")
 	flag.BoolVar(&args.RenderFirstFrame, "render-first-frame", false, "Render only the first frame and save as first_frame.png.")
 
+	fmt.Println(os.Args)
 	flag.Parse()
+
 
 	// Auto-calculate video size
 	args.VideoWidth = args.WidgetSize + 40
-	args.VideoHeight = args.WidgetSize + 180
+	args.VideoHeight = args.WidgetSize + 200
 
 	args.PathWidth = *pathWidth
 	args.PathColor, _ = parseHexColor(pathColorStr)
@@ -264,14 +266,14 @@ func main() {
 		track.TotalDistance += haversine(track.Points[i-1], track.Points[i])
 	}
 
+	font, err := truetype.Parse(goregular.TTF)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if args.RenderFirstFrame {
 		log.Println("Rendering first frame only...")
-		font, err := truetype.Parse(goregular.TTF)
-		if err != nil {
-			log.Fatal(err)
-		}
-		face := truetype.NewFace(font, &truetype.Options{Size: 32})
-		img := renderFrame(0, 1, track, args, face)
+		img := renderFrame(0, 1, track, args, font)
 		gg.SavePNG("first_frame.png", img)
 		log.Println("Saved first_frame.png")
 		return
@@ -317,7 +319,7 @@ func main() {
 	}()
 
 	// --- Frame Generation ---
-	generateFrames(frameChan, track, args, totalFrames)
+	generateFrames(frameChan, track, args, totalFrames, font)
 	close(frameChan)
 
 	wg.Wait()
@@ -372,7 +374,7 @@ func prefetchTiles(points []Point, args *Arguments) {
 	wg.Wait()
 }
 
-func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, totalFrames int) {
+func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, totalFrames int, font *truetype.Font) {
 	var wg sync.WaitGroup
 	tasks := make(chan int, totalFrames)
 	for i := 0; i < totalFrames; i++ {
@@ -380,20 +382,14 @@ func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, total
 	}
 	close(tasks)
 
-	font, err := truetype.Parse(goregular.TTF)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	for i := 0; i < args.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			face := truetype.NewFace(font, &truetype.Options{Size: 32})
 			pngBuffer := new(bytes.Buffer)
 
 			for frameNum := range tasks {
-				img := renderFrame(frameNum, totalFrames, track, args, face)
+				img := renderFrame(frameNum, totalFrames, track, args, font)
 				
 				pngBuffer.Reset()
 				err := png.Encode(pngBuffer, img)
@@ -412,30 +408,41 @@ func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, total
 	wg.Wait()
 }
 
-func drawSpeedIcon(dc *gg.Context, x, y float64) {
+func drawSpeedIcon(dc *gg.Context, x, y, size, lineWidth float64) {
 	dc.Push()
 	dc.Translate(x, y)
-	dc.SetLineWidth(2)
-	dc.DrawCircle(0, 0, 12)
+	dc.SetLineWidth(lineWidth)
+
+	// Draw a semicircle from 165 to 375 degrees
+	startAngle := gg.Radians(165)
+	endAngle := gg.Radians(375)
+	dc.DrawArc(0, 0, size/2, startAngle, endAngle)
 	dc.Stroke()
+
+	// Draw the needle
+	needleAngle := gg.Radians(210) // Example angle
 	dc.MoveTo(0, 0)
-	dc.LineTo(-6, -6)
+	dc.LineTo(math.Cos(needleAngle)*size/2.2, math.Sin(needleAngle)*size/2.2)
 	dc.Stroke()
 	dc.Pop()
 }
 
-func drawSlopeIcon(dc *gg.Context, x, y float64) {
+func drawSlopeIcon(dc *gg.Context, x, y, size, lineWidth float64) {
 	dc.Push()
 	dc.Translate(x, y)
-	dc.SetLineWidth(2)
-	dc.MoveTo(0, 0)
-	dc.LineTo(15, 0)
-	dc.LineTo(15, -15)
+	dc.SetLineWidth(lineWidth)
+	// Draw a 30-degree slope triangle
+	angle := gg.Radians(30)
+	legX := size
+	legY := size * math.Tan(angle)
+	dc.MoveTo(legX, legY/2)
+	dc.LineTo(0, legY/2)
+	dc.LineTo(legX, -legY/2)
 	dc.Stroke()
 	dc.Pop()
 }
 
-func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, face font.Face) image.Image {
+func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font *truetype.Font) image.Image {
 	startTime := track.Points[0].Timestamp
 	timeOffset := float64(frameNum) / args.Framerate
 	currentPoint := findPointForTime(timeOffset, startTime, track.SmoothedPoints)
@@ -556,24 +563,75 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, face 
 	frameDC.Stroke()
 
 	// --- Indicators ---
-	frameDC.SetFontFace(face)
-	frameDC.SetColor(args.IndicatorColor)
+
+	// Proportional sizing
+	widgetWidth := float64(args.WidgetSize)
+	valueFontSize := widgetWidth / 8.0
+	unitFontSize := valueFontSize / 2.0
+	iconSize := widgetWidth / 9.0
+	iconLineWidth := widgetWidth / 150.0
 	
-	// Row 1: Speed and Slope
-	row1Y := mapPosY + float64(args.WidgetSize) + 50
-	drawSpeedIcon(frameDC, mapPosX+15, row1Y-10)
-	speedText := fmt.Sprintf("%.1f km/h", speed)
-	frameDC.DrawString(speedText, mapPosX+35, row1Y)
+	valueFace := truetype.NewFace(font, &truetype.Options{Size: valueFontSize})
+	unitFace := truetype.NewFace(font, &truetype.Options{Size: unitFontSize})
 
-	slopeText := fmt.Sprintf("%.1f %%", slope)
-	w, _ := frameDC.MeasureString(slopeText)
-	drawSlopeIcon(frameDC, mapPosX+float64(args.WidgetSize)-w-25, row1Y-10)
-	frameDC.DrawStringAnchored(slopeText, mapPosX+float64(args.WidgetSize), row1Y, 1, 0)
+	row1Y := mapPosY + widgetWidth + valueFontSize*1.2
+	
+	frameDC.SetColor(args.IndicatorColor)
 
-	// Row 2: Distance Bar
-	row2Y := row1Y + 45
-	barWidth := float64(args.WidgetSize)
-	barHeight := float64(20)
+	// --- Speed Indicator (Left Third) ---
+	speedBlockX := mapPosX
+	speedBlockWidth := widgetWidth / 3.0
+	
+	speedIconX := speedBlockX + iconSize/2
+	speedIconY := row1Y - 1.25 * valueFontSize
+	drawSpeedIcon(frameDC, speedIconX, speedIconY, iconSize, iconLineWidth)
+
+	speedValueText := fmt.Sprintf("%.1f", speed)
+	speedUnitText := " km/h"
+	
+	frameDC.SetFontFace(valueFace)
+	valueWidth, _ := frameDC.MeasureString(speedValueText)
+	frameDC.SetFontFace(unitFace)
+	unitWidth, _ := frameDC.MeasureString(speedUnitText)
+
+	totalTextWidth := valueWidth + unitWidth
+	startX := speedBlockX + speedBlockWidth - totalTextWidth
+
+	frameDC.SetFontFace(valueFace)
+	frameDC.DrawString(speedValueText, startX, row1Y)
+	frameDC.SetFontFace(unitFace)
+	frameDC.DrawString(speedUnitText, startX + valueWidth, row1Y)
+
+
+	// --- Slope Indicator (Right Third) ---
+	slopeBlockX := mapPosX + widgetWidth*2/3
+	slopeBlockWidth := widgetWidth / 3.0
+
+	slopeIconX := slopeBlockX + 2 * iconSize
+	slopeIconY := row1Y - 1.25 * valueFontSize
+	drawSlopeIcon(frameDC, slopeIconX, slopeIconY, iconSize, iconLineWidth)
+
+	slopeValueText := fmt.Sprintf("%.1f", slope)
+	slopeUnitText := " %"
+
+	frameDC.SetFontFace(valueFace)
+	valueWidth, _ = frameDC.MeasureString(slopeValueText)
+	frameDC.SetFontFace(unitFace)
+	unitWidth, _ = frameDC.MeasureString(slopeUnitText)
+
+	totalTextWidth = valueWidth + unitWidth
+	startX = slopeBlockX + slopeBlockWidth - totalTextWidth
+
+	frameDC.SetFontFace(valueFace)
+	frameDC.DrawString(slopeValueText, startX, row1Y)
+	frameDC.SetFontFace(unitFace)
+	frameDC.DrawString(slopeUnitText, startX + valueWidth, row1Y)
+
+
+	// --- Row 2: Distance Bar ---
+	row2Y := row1Y + unitFontSize*1.2
+	barWidth := widgetWidth
+	barHeight := 20.0
 	progress := currentDistance / track.TotalDistance
 
 	// Bar background
@@ -588,6 +646,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, face 
 	// Distance text
 	distText := fmt.Sprintf("%.2f / %.2f km", currentDistance, track.TotalDistance)
 	frameDC.SetColor(args.IndicatorColor)
+	frameDC.SetFontFace(unitFace) // Using smaller font for distance text
 	frameDC.DrawStringAnchored(distText, mapPosX+barWidth/2, row2Y+barHeight/2, 0.5, 0.5)
 
 	return frameDC.Image()
