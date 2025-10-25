@@ -28,8 +28,10 @@ import (
 )
 
 const (
-	tileCacheDir = "tiles"
-	tileSize     = 256
+	tileCacheDir           = "tiles"
+	tileSize               = 256
+	slopeMaxEleChange      = 3.0
+	slopeCalculationPoints = 5
 )
 
 // --- Structs ---
@@ -41,20 +43,21 @@ type MapStyle struct {
 }
 
 type Arguments struct {
-	GpxFile        string
-	OutputFile     string
-	VideoWidth     int
-	VideoHeight    int
-	Bitrate        string
-	Workers        int
-	Framerate      float64
-	MapStyle       string
-	MapZoom        int
-	WidgetSize     int
-	PathWidth      float64
-	PathColor      color.Color
-	BorderColor    color.Color
-	IndicatorColor color.Color
+	GpxFile          string
+	OutputFile       string
+	VideoWidth       int
+	VideoHeight      int
+	Bitrate          string
+	Workers          int
+	Framerate        float64
+	MapStyle         string
+	MapZoom          int
+	WidgetSize       int
+	PathWidth        float64
+	PathColor        color.Color
+	BorderColor      color.Color
+	IndicatorColor   color.Color
+	RenderFirstFrame bool
 }
 
 type Frame struct {
@@ -69,6 +72,12 @@ type Point struct {
 
 type Tile struct {
 	X, Y, Z int
+}
+
+type Track struct {
+	Points         []Point
+	SmoothedPoints []Point
+	TotalDistance  float64
 }
 
 var mapStyles = map[string]MapStyle{
@@ -93,12 +102,13 @@ func parseArguments() *Arguments {
 	flag.IntVar(&args.Workers, "workers", runtime.NumCPU(), "Number of parallel workers for frame generation.")
 	flag.Float64Var(&args.Framerate, "framerate", 23.976, "Video framerate.")
 	flag.StringVar(&args.MapStyle, "style", "default", "Map style (e.g., default, cyclosm, toner).")
-	flag.IntVar(&args.MapZoom, "map-zoom", 15, "Map zoom level. Default 15 is approx 1km diameter for a 400px widget.")
-	flag.IntVar(&args.WidgetSize, "widget-size", 300, "Map widget diameter in pixels.")
+	flag.IntVar(&args.MapZoom, "map-zoom", 16, "Map zoom level. Default 15 is approx 1km diameter for a 400px widget.")
+	flag.IntVar(&args.WidgetSize, "widget-size", 600, "Map widget diameter in pixels.")
 	pathWidth := flag.Float64("path-width", 4, "Width of the drawn path.")
 	flag.StringVar(&pathColorStr, "path-color", "#FF0000", "Color of the drawn path (hex).")
-	flag.StringVar(&borderColorStr, "border-color", "#FFFFFF", "Color of the map border (hex).")
+	flag.StringVar(&borderColorStr, "border-color", "#ff9800", "Color of the map border (hex).")
 	flag.StringVar(&indicatorColorStr, "indicator-color", "#FFFFFF", "Color of the text indicators (hex).")
+	flag.BoolVar(&args.RenderFirstFrame, "render-first-frame", false, "Render only the first frame and save as first_frame.png.")
 
 	flag.Parse()
 
@@ -123,7 +133,7 @@ func parseHexColor(s string) (color.Color, error) {
 	return color.RGBA{r, g, b, 255}, nil
 }
 
-// --- GPX Parsing ---
+// --- GPX Parsing & Processing ---
 
 func parseGpx(filePath string) ([]Point, error) {
 	gpxFile, err := gpx.ParseFile(filePath)
@@ -146,6 +156,21 @@ func parseGpx(filePath string) ([]Point, error) {
 	return points, nil
 }
 
+func preprocessGpxPoints(points []Point) []Point {
+	if len(points) == 0 {
+		return points
+	}
+	smoothed := make([]Point, len(points))
+	copy(smoothed, points)
+
+	for i := 1; i < len(smoothed); i++ {
+		if math.Abs(smoothed[i].Ele-smoothed[i-1].Ele) > slopeMaxEleChange {
+			smoothed[i].Ele = smoothed[i-1].Ele
+		}
+	}
+	return smoothed
+}
+
 // --- Coordinate & Tile Math ---
 
 func deg2num(lat, lon float64, zoom int) (float64, float64) {
@@ -161,7 +186,10 @@ func deg2num(lat, lon float64, zoom int) (float64, float64) {
 var tileCache sync.Map // Concurrent map for caching tiles
 
 func getTileImage(style string, z, x, y int) (image.Image, error) {
-	styleInfo := mapStyles[style]
+	styleInfo, ok := mapStyles[style]
+	if !ok {
+		panic(fmt.Sprintf("invalid map style: %s", style))
+	}
 	tilePath := filepath.Join(tileCacheDir, styleInfo.Name, strconv.Itoa(z), strconv.Itoa(x), fmt.Sprintf("%d.png", y))
 
 	if img, ok := tileCache.Load(tilePath); ok {
@@ -230,6 +258,25 @@ func main() {
 		log.Fatal("Not enough points in GPX file.")
 	}
 
+	track := &Track{Points: points}
+	track.SmoothedPoints = preprocessGpxPoints(track.Points)
+	for i := 1; i < len(track.Points); i++ {
+		track.TotalDistance += haversine(track.Points[i-1], track.Points[i])
+	}
+
+	if args.RenderFirstFrame {
+		log.Println("Rendering first frame only...")
+		font, err := truetype.Parse(goregular.TTF)
+		if err != nil {
+			log.Fatal(err)
+		}
+		face := truetype.NewFace(font, &truetype.Options{Size: 32})
+		img := renderFrame(0, 1, track, args, face)
+		gg.SavePNG("first_frame.png", img)
+		log.Println("Saved first_frame.png")
+		return
+	}
+
 	// --- FFMPEG Setup ---
 	ffmpegCmd := exec.Command("ffmpeg", "-y", "-f", "image2pipe", "-vcodec", "png", "-r", fmt.Sprintf("%f", args.Framerate), "-i", "-", "-c:v", "libx264", "-b:v", args.Bitrate, "-pix_fmt", "yuva420p", "-r", fmt.Sprintf("%f", args.Framerate), args.OutputFile)
 	ffmpegIn, err := ffmpegCmd.StdinPipe()
@@ -242,12 +289,12 @@ func main() {
 	}
 
 	// --- Prefetch Tiles ---
-	prefetchTiles(points, args)
+	prefetchTiles(track.Points, args)
 
 	// --- Concurrency Setup ---
 	var wg sync.WaitGroup
 	frameChan := make(chan Frame, int(args.Framerate)*2)
-	totalDuration := points[len(points)-1].Timestamp.Sub(points[0].Timestamp)
+	totalDuration := track.Points[len(track.Points)-1].Timestamp.Sub(track.Points[0].Timestamp)
 	totalFrames := int(totalDuration.Seconds() * args.Framerate)
 
 	// --- Encoder Goroutine ---
@@ -270,7 +317,7 @@ func main() {
 	}()
 
 	// --- Frame Generation ---
-	generateFrames(frameChan, points, args, totalFrames)
+	generateFrames(frameChan, track, args, totalFrames)
 	close(frameChan)
 
 	wg.Wait()
@@ -325,7 +372,7 @@ func prefetchTiles(points []Point, args *Arguments) {
 	wg.Wait()
 }
 
-func generateFrames(frameChan chan<- Frame, points []Point, args *Arguments, totalFrames int) {
+func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, totalFrames int) {
 	var wg sync.WaitGroup
 	tasks := make(chan int, totalFrames)
 	for i := 0; i < totalFrames; i++ {
@@ -346,7 +393,7 @@ func generateFrames(frameChan chan<- Frame, points []Point, args *Arguments, tot
 			pngBuffer := new(bytes.Buffer)
 
 			for frameNum := range tasks {
-				img := renderFrame(frameNum, totalFrames, points, args, face)
+				img := renderFrame(frameNum, totalFrames, track, args, face)
 				
 				pngBuffer.Reset()
 				err := png.Encode(pngBuffer, img)
@@ -365,19 +412,42 @@ func generateFrames(frameChan chan<- Frame, points []Point, args *Arguments, tot
 	wg.Wait()
 }
 
-func renderFrame(frameNum, totalFrames int, points []Point, args *Arguments, face font.Face) image.Image {
-	startTime := points[0].Timestamp
+func drawSpeedIcon(dc *gg.Context, x, y float64) {
+	dc.Push()
+	dc.Translate(x, y)
+	dc.SetLineWidth(2)
+	dc.DrawCircle(0, 0, 12)
+	dc.Stroke()
+	dc.MoveTo(0, 0)
+	dc.LineTo(-6, -6)
+	dc.Stroke()
+	dc.Pop()
+}
+
+func drawSlopeIcon(dc *gg.Context, x, y float64) {
+	dc.Push()
+	dc.Translate(x, y)
+	dc.SetLineWidth(2)
+	dc.MoveTo(0, 0)
+	dc.LineTo(15, 0)
+	dc.LineTo(15, -15)
+	dc.Stroke()
+	dc.Pop()
+}
+
+func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, face font.Face) image.Image {
+	startTime := track.Points[0].Timestamp
 	timeOffset := float64(frameNum) / args.Framerate
-	currentPoint := findPointForTime(timeOffset, startTime, points)
+	currentPoint := findPointForTime(timeOffset, startTime, track.SmoothedPoints)
 
 	// --- Calculations ---
-	var speed, slope, totalDistance float64
+	var speed, slope, currentDistance float64
 	pathSoFar := []Point{}
-	for i := 0; i < len(points) && points[i].Timestamp.Before(currentPoint.Timestamp); i++ {
+	for i := 0; i < len(track.Points) && track.Points[i].Timestamp.Before(currentPoint.Timestamp); i++ {
 		if i > 0 {
-			totalDistance += haversine(points[i-1], points[i])
+			currentDistance += haversine(track.Points[i-1], track.Points[i])
 		}
-		pathSoFar = append(pathSoFar, points[i])
+		pathSoFar = append(pathSoFar, track.Points[i])
 	}
 	pathSoFar = append(pathSoFar, currentPoint)
 
@@ -389,9 +459,16 @@ func renderFrame(frameNum, totalFrames int, points []Point, args *Arguments, fac
 		if timeDelta > 0 {
 			speed = (distDelta * 3600) / timeDelta
 		}
+	}
+
+	// Smoothed Slope
+	if len(pathSoFar) > slopeCalculationPoints {
+		p1 := pathSoFar[len(pathSoFar)-1-slopeCalculationPoints]
+		p2 := pathSoFar[len(pathSoFar)-1]
+		horizDist := haversine(p1, p2) * 1000
 		eleDelta := p2.Ele - p1.Ele
-		if distDelta*1000 > 0 {
-			slope = (eleDelta / (distDelta * 1000)) * 100
+		if horizDist > 0 {
+			slope = (eleDelta / horizDist) * 100
 		}
 	}
 
@@ -461,20 +538,57 @@ func renderFrame(frameNum, totalFrames int, points []Point, args *Arguments, fac
 	mapPosY := float64(20)
 	frameDC.DrawImage(mask.Image(), int(mapPosX), int(mapPosY))
 
-	// Border
+	// 3D Border
 	borderWidth := float64(args.WidgetSize) * 0.04
+	// Shadow (bottom-right)
+	frameDC.SetColor(color.RGBA{R: 0, G: 0, B: 0, A: 80})
+	frameDC.SetLineWidth(borderWidth * 0.75)
+	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/3, mapPosY+widgetRadiusPx+borderWidth/3, widgetRadiusPx, gg.Radians(-45), gg.Radians(135))
+	frameDC.Stroke()
+	// Highlight (top-left)
+	frameDC.SetColor(color.RGBA{R: 255, G: 255, B: 255, A: 80})
+	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/3, mapPosY+widgetRadiusPx+borderWidth/3, widgetRadiusPx, gg.Radians(135), gg.Radians(315))
+	frameDC.Stroke()
+	// Main Border
 	frameDC.SetColor(args.BorderColor)
 	frameDC.SetLineWidth(borderWidth)
 	frameDC.DrawCircle(mapPosX+widgetRadiusPx, mapPosY+widgetRadiusPx, widgetRadiusPx)
 	frameDC.Stroke()
 
-	// Indicators
+	// --- Indicators ---
 	frameDC.SetFontFace(face)
 	frameDC.SetColor(args.IndicatorColor)
-	textY := mapPosY + float64(args.WidgetSize) + 40
-	frameDC.DrawString(fmt.Sprintf("Dist: %.2f km", totalDistance), mapPosX, textY)
-	frameDC.DrawString(fmt.Sprintf("Speed: %.1f km/h", speed), mapPosX, textY+40)
-	frameDC.DrawString(fmt.Sprintf("Slope: %.1f %%", slope), mapPosX, textY+80)
+	
+	// Row 1: Speed and Slope
+	row1Y := mapPosY + float64(args.WidgetSize) + 50
+	drawSpeedIcon(frameDC, mapPosX+15, row1Y-10)
+	speedText := fmt.Sprintf("%.1f km/h", speed)
+	frameDC.DrawString(speedText, mapPosX+35, row1Y)
+
+	slopeText := fmt.Sprintf("%.1f %%", slope)
+	w, _ := frameDC.MeasureString(slopeText)
+	drawSlopeIcon(frameDC, mapPosX+float64(args.WidgetSize)-w-25, row1Y-10)
+	frameDC.DrawStringAnchored(slopeText, mapPosX+float64(args.WidgetSize), row1Y, 1, 0)
+
+	// Row 2: Distance Bar
+	row2Y := row1Y + 45
+	barWidth := float64(args.WidgetSize)
+	barHeight := float64(20)
+	progress := currentDistance / track.TotalDistance
+
+	// Bar background
+	frameDC.SetColor(color.RGBA{80, 80, 80, 255})
+	frameDC.DrawRectangle(mapPosX, row2Y, barWidth, barHeight)
+	frameDC.Fill()
+	// Bar progress
+	frameDC.SetColor(color.RGBA{100, 180, 255, 255})
+	frameDC.DrawRectangle(mapPosX, row2Y, barWidth*progress, barHeight)
+	frameDC.Fill()
+
+	// Distance text
+	distText := fmt.Sprintf("%.2f / %.2f km", currentDistance, track.TotalDistance)
+	frameDC.SetColor(args.IndicatorColor)
+	frameDC.DrawStringAnchored(distText, mapPosX+barWidth/2, row2Y+barHeight/2, 0.5, 0.5)
 
 	return frameDC.Image()
 }
