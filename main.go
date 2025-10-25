@@ -410,23 +410,57 @@ func main() {
 	totalDuration := track.Points[len(track.Points)-1].Timestamp.Sub(track.Points[0].Timestamp)
 	totalFrames := int(totalDuration.Seconds() * args.Framerate)
 
-	// --- Encoder Goroutine ---
+	// --- Encoder Goroutine (with reordering and timeout) ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer ffmpegIn.Close()
+
 		bar := progressbar.Default(int64(totalFrames), "Encoding")
-		for i := 0; i < totalFrames; i++ {
-			frame, ok := <-frameChan
-			if !ok {
-				break
+		frameBuffer := make(map[int][]byte)
+		nextFrameToWrite := 0
+		const frameWaitTimeout = 60 * time.Second
+		timeout := time.NewTimer(frameWaitTimeout)
+
+		for nextFrameToWrite < totalFrames {
+			select {
+			case frame, ok := <-frameChan:
+				if !ok {
+					// This shouldn't happen if generateFrames waits correctly, but handle it.
+					log.Printf("Frame channel closed prematurely. Last written frame: %d", nextFrameToWrite-1)
+					return
+				}
+
+				frameBuffer[frame.Number] = frame.Data
+				if !timeout.Stop() {
+					<-timeout.C
+				}
+				timeout.Reset(frameWaitTimeout)
+
+				// Write all contiguous frames that are ready
+				for {
+					data, found := frameBuffer[nextFrameToWrite]
+					if !found {
+						break // Don't have the next frame yet, wait for it.
+					}
+
+					_, err := ffmpegIn.Write(data)
+					if err != nil {
+						log.Printf("Error writing frame %d to ffmpeg: %v", nextFrameToWrite, err)
+						// Depending on desired robustness, we might want to abort here.
+					}
+					bar.Add(1)
+
+					// Clean up buffer and advance
+					delete(frameBuffer, nextFrameToWrite)
+					nextFrameToWrite++
+				}
+
+			case <-timeout.C:
+				log.Fatalf("Timeout: Stuck waiting for frame %d for over %v. A worker may have hung.", nextFrameToWrite, frameWaitTimeout)
+				return // Exit goroutine
 			}
-			_, err := ffmpegIn.Write(frame.Data)
-			if err != nil {
-				log.Printf("Error writing to ffmpeg: %v", err)
-			}
-			bar.Add(1)
 		}
-		ffmpegIn.Close()
 	}()
 
 	// --- Frame Generation ---
@@ -487,12 +521,17 @@ func prefetchTiles(points []Point, args *Arguments) {
 
 func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, totalFrames int, font *truetype.Font) {
 	var wg sync.WaitGroup
-	tasks := make(chan int, totalFrames)
-	for i := 0; i < totalFrames; i++ {
-		tasks <- i
-	}
-	close(tasks)
+	tasks := make(chan int, args.Workers*2) // Bounded channel to apply backpressure
 
+	// Start a producer goroutine to feed the tasks channel
+	go func() {
+		for i := 0; i < totalFrames; i++ {
+			tasks <- i
+		}
+		close(tasks)
+	}()
+
+	// Start worker goroutines
 	for i := 0; i < args.Workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -501,7 +540,7 @@ func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, total
 
 			for frameNum := range tasks {
 				img := renderFrame(frameNum, totalFrames, track, args, font)
-				
+
 				pngBuffer.Reset()
 				err := png.Encode(pngBuffer, img)
 				if err != nil {
