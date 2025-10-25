@@ -58,6 +58,8 @@ type Arguments struct {
 	BorderColor      color.Color
 	IndicatorColor   color.Color
 	RenderFirstFrame bool
+	Is2x             bool
+	TileSize         int
 }
 
 type Frame struct {
@@ -109,6 +111,7 @@ func parseArguments() *Arguments {
 	flag.StringVar(&borderColorStr, "border-color", "#ff9800", "Color of the map border (hex).")
 	flag.StringVar(&indicatorColorStr, "indicator-color", "#FFFFFF", "Color of the text indicators (hex).")
 	flag.BoolVar(&args.RenderFirstFrame, "render-first-frame", false, "Render only the first frame and save as first_frame.png.")
+	flag.BoolVar(&args.Is2x, "2x", false, "Use 2x tiles.")
 
 	fmt.Println(os.Args)
 	flag.Parse()
@@ -122,6 +125,12 @@ func parseArguments() *Arguments {
 	args.PathColor, _ = parseHexColor(pathColorStr)
 	args.BorderColor, _ = parseHexColor(borderColorStr)
 	args.IndicatorColor, _ = parseHexColor(indicatorColorStr)
+
+	if args.Is2x {
+		args.TileSize = 512
+	} else {
+		args.TileSize = 256
+	}
 
 	return args
 }
@@ -187,12 +196,17 @@ func deg2num(lat, lon float64, zoom int) (float64, float64) {
 
 var tileCache sync.Map // Concurrent map for caching tiles
 
-func getTileImage(style string, z, x, y int) (image.Image, error) {
+func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, error) {
 	styleInfo, ok := mapStyles[style]
 	if !ok {
-		panic(fmt.Sprintf("invalid map style: %s", style))
+		return nil, fmt.Errorf("invalid map style: %s", style)
 	}
-	tilePath := filepath.Join(tileCacheDir, styleInfo.Name, strconv.Itoa(z), strconv.Itoa(x), fmt.Sprintf("%d.png", y))
+
+	tileName := fmt.Sprintf("%d.png", y)
+	if args.Is2x {
+		tileName = fmt.Sprintf("%d@2x.png", y)
+	}
+	tilePath := filepath.Join(tileCacheDir, styleInfo.Name, strconv.Itoa(z), strconv.Itoa(x), tileName)
 
 	if img, ok := tileCache.Load(tilePath); ok {
 		return img.(image.Image), nil
@@ -208,6 +222,9 @@ func getTileImage(style string, z, x, y int) (image.Image, error) {
 		if err != nil {
 			return nil, err
 		}
+		if args.Is2x && (img.Bounds().Dx() != 512 || img.Bounds().Dy() != 512) {
+			return nil, fmt.Errorf("style %s does not support 2x: tile is %dx%d", style, img.Bounds().Dx(), img.Bounds().Dy())
+		}
 		tileCache.Store(tilePath, img)
 		return img, nil
 	}
@@ -216,6 +233,9 @@ func getTileImage(style string, z, x, y int) (image.Image, error) {
 	url := strings.Replace(styleInfo.URL, "{z}", strconv.Itoa(z), 1)
 	url = strings.Replace(url, "{x}", strconv.Itoa(x), 1)
 	url = strings.Replace(url, "{y}", strconv.Itoa(y), 1)
+	if args.Is2x {
+		url = strings.Replace(url, ".png", "@2x.png", 1)
+	}
 
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "GpsOverlayVideoGo/0.1")
@@ -224,14 +244,25 @@ func getTileImage(style string, z, x, y int) (image.Image, error) {
 	}
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != 200 {
-		return nil, fmt.Errorf("failed to download tile %s: %v", url, err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download tile %s: %w", url, err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound && args.Is2x {
+		return nil, fmt.Errorf("style %s does not support 2x (got 404 for tile: %s)", style, url)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to download tile %s: status %d", url, resp.StatusCode)
+	}
 
 	img, _, err := image.Decode(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+
+	if args.Is2x && (img.Bounds().Dx() != 512 || img.Bounds().Dy() != 512) {
+		return nil, fmt.Errorf("style %s does not support 2x: downloaded tile is %dx%d", style, img.Bounds().Dx(), img.Bounds().Dy())
 	}
 
 	os.MkdirAll(filepath.Dir(tilePath), 0755)
@@ -337,18 +368,18 @@ func prefetchTiles(points []Point, args *Arguments) {
 
 	for _, p := range points {
 		worldPx, worldPy := deg2num(p.Lat, p.Lon, args.MapZoom)
-		worldPx *= tileSize
-		worldPy *= tileSize
+		worldPx *= float64(args.TileSize)
+		worldPy *= float64(args.TileSize)
 
 		px_min := worldPx - widgetRadiusPx
 		py_min := worldPy - widgetRadiusPx
 		px_max := worldPx + widgetRadiusPx
 		py_max := worldPy + widgetRadiusPx
 
-		tx_min := math.Floor(px_min / tileSize)
-		ty_min := math.Floor(py_min / tileSize)
-		tx_max := math.Floor(px_max / tileSize)
-		ty_max := math.Floor(py_max / tileSize)
+		tx_min := math.Floor(px_min / float64(args.TileSize))
+		ty_min := math.Floor(py_min / float64(args.TileSize))
+		tx_max := math.Floor(px_max / float64(args.TileSize))
+		ty_max := math.Floor(py_max / float64(args.TileSize))
 
 		for x := int(tx_min); x <= int(tx_max); x++ {
 			for y := int(ty_min); y <= int(ty_max); y++ {
@@ -366,7 +397,7 @@ func prefetchTiles(points []Point, args *Arguments) {
 		limit <- struct{}{}
 		go func(t Tile) {
 			defer wg.Done()
-			getTileImage(args.MapStyle, t.Z, t.X, t.Y)
+			getTileImage(args.MapStyle, t.Z, t.X, t.Y, args)
 			bar.Add(1)
 			<-limit
 		}(tile)
@@ -482,35 +513,38 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	// --- Map Rendering ---
 	widgetRadiusPx := float64(args.WidgetSize) / 2.0
 	worldPx, worldPy := deg2num(currentPoint.Lat, currentPoint.Lon, args.MapZoom)
-	worldPx *= tileSize
-	worldPy *= tileSize
+	worldPx *= float64(args.TileSize)
+	worldPy *= float64(args.TileSize)
 
 	px_min := worldPx - widgetRadiusPx
 	py_min := worldPy - widgetRadiusPx
 	px_max := worldPx + widgetRadiusPx
 	py_max := worldPy + widgetRadiusPx
 
-	tx_min := math.Floor(px_min / tileSize)
-	ty_min := math.Floor(py_min / tileSize)
-	tx_max := math.Floor(px_max / tileSize)
-	ty_max := math.Floor(py_max / tileSize)
+	tx_min := math.Floor(px_min / float64(args.TileSize))
+	ty_min := math.Floor(py_min / float64(args.TileSize))
+	tx_max := math.Floor(px_max / float64(args.TileSize))
+	ty_max := math.Floor(py_max / float64(args.TileSize))
 
-	mapWidth := (int(tx_max) - int(tx_min) + 1) * tileSize
-	mapHeight := (int(ty_max) - int(ty_min) + 1) * tileSize
+	mapWidth := (int(tx_max) - int(tx_min) + 1) * args.TileSize
+	mapHeight := (int(ty_max) - int(ty_min) + 1) * args.TileSize
 	mapImage := image.NewRGBA(image.Rect(0, 0, mapWidth, mapHeight))
 	mapDC := gg.NewContextForRGBA(mapImage)
 
 	for x := int(tx_min); x <= int(tx_max); x++ {
 		for y := int(ty_min); y <= int(ty_max); y++ {
-			tileImg, _ := getTileImage(args.MapStyle, args.MapZoom, x, y)
+			tileImg, err := getTileImage(args.MapStyle, args.MapZoom, x, y, args)
+			if err != nil {
+				log.Printf("could not get tile image: %v", err)
+			}
 			if tileImg != nil {
-				mapDC.DrawImage(tileImg, (x-int(tx_min))*tileSize, (y-int(ty_min))*tileSize)
+				mapDC.DrawImage(tileImg, (x-int(tx_min))*args.TileSize, (y-int(ty_min))*args.TileSize)
 			}
 		}
 	}
 
-	centerPxOnMap := worldPx - (tx_min * tileSize)
-	centerPyOnMap := worldPy - (ty_min * tileSize)
+	centerPxOnMap := worldPx - (tx_min * float64(args.TileSize))
+	centerPyOnMap := worldPy - (ty_min * float64(args.TileSize))
 
 	// Path
 	if len(pathSoFar) > 1 {
@@ -519,7 +553,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 		for i := 1; i < len(pathSoFar); i++ {
 			p1x, p1y := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, args.MapZoom)
 			p2x, p2y := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, args.MapZoom)
-			mapDC.DrawLine((p1x-tx_min)*tileSize, (p1y-ty_min)*tileSize, (p2x-tx_min)*tileSize, (p2y-ty_min)*tileSize)
+			mapDC.DrawLine((p1x-tx_min)*float64(args.TileSize), (p1y-ty_min)*float64(args.TileSize), (p2x-tx_min)*float64(args.TileSize), (p2y-ty_min)*float64(args.TileSize))
 			mapDC.Stroke()
 		}
 	}
