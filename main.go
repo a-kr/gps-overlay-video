@@ -60,6 +60,7 @@ type Arguments struct {
 	RenderFirstFrame bool
 	Is2x             bool
 	TileSize         int
+	DebugSlope       bool
 }
 
 type Frame struct {
@@ -68,7 +69,7 @@ type Frame struct {
 }
 
 type Point struct {
-	Lat, Lon, Ele float64
+	Lat, Lon, Ele, Speed, Slope, Distance float64
 	Timestamp     time.Time
 }
 
@@ -112,6 +113,7 @@ func parseArguments() *Arguments {
 	flag.StringVar(&indicatorColorStr, "indicator-color", "#FFFFFF", "Color of the text indicators (hex).")
 	flag.BoolVar(&args.RenderFirstFrame, "render-first-frame", false, "Render only the first frame and save as first_frame.png.")
 	flag.BoolVar(&args.Is2x, "2x", true, "Use 2x tiles.")
+	flag.BoolVar(&args.DebugSlope, "debug-slope", false, "Debug slope calculation.")
 
 	fmt.Println(os.Args)
 	flag.Parse()
@@ -164,11 +166,39 @@ func parseGpx(filePath string) ([]Point, error) {
 			}
 		}
 	}
+	var firstEle float64
+	firstEleIdx := -1
+	for i, p := range points {
+		if p.Ele != 0 {
+			firstEle = p.Ele
+			firstEleIdx = i
+			break
+		}
+	}
+
+	if firstEleIdx != -1 {
+		for i := 0; i < firstEleIdx; i++ {
+			points[i].Ele = firstEle
+		}
+	}
+
+	var lastEle float64
+	if len(points) > 0 {
+		lastEle = points[0].Ele
+	}
+	for i := range points {
+		if points[i].Ele != 0 {
+			lastEle = points[i].Ele
+		} else {
+			points[i].Ele = lastEle
+		}
+	}
+
 	return points, nil
 }
 
 func preprocessGpxPoints(points []Point) []Point {
-	if len(points) == 0 {
+	if len(points) < 2 {
 		return points
 	}
 	smoothed := make([]Point, len(points))
@@ -179,6 +209,28 @@ func preprocessGpxPoints(points []Point) []Point {
 			smoothed[i].Ele = smoothed[i-1].Ele
 		}
 	}
+
+	for i := 1; i < len(smoothed); i++ {
+		smoothed[i].Distance = smoothed[i-1].Distance + haversine(smoothed[i-1], smoothed[i])
+		p1 := smoothed[i-1]
+		p2 := smoothed[i]
+		distDelta := haversine(p1, p2)
+		timeDelta := p2.Timestamp.Sub(p1.Timestamp).Seconds()
+		if timeDelta > 0 {
+			smoothed[i].Speed = (distDelta * 3600) / timeDelta
+		}
+
+		if i > slopeCalculationPoints {
+			p1_slope := smoothed[i-slopeCalculationPoints]
+			p2_slope := smoothed[i]
+			horizDist := haversine(p1_slope, p2_slope) * 1000
+			eleDelta := p2_slope.Ele - p1_slope.Ele
+			if horizDist > 0 {
+				smoothed[i].Slope = (eleDelta / horizDist) * 100
+			}
+		}
+	}
+
 	return smoothed
 }
 
@@ -300,6 +352,14 @@ func main() {
 	for i := 1; i < len(track.Points); i++ {
 		track.TotalDistance += haversine(track.Points[i-1], track.Points[i])
 	}
+
+    if args.DebugSlope {
+        for i := 1; i < len(track.SmoothedPoints); i++ {
+			p := track.SmoothedPoints[i]
+			fmt.Printf("Point %d: Speed: %.2f km/h, Slope: %.2f%%\n", i, p.Speed, p.Slope)
+        }
+        return
+    }
 
 	font, err := truetype.Parse(goregular.TTF)
 	if err != nil {
@@ -483,36 +543,15 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	currentPoint := findPointForTime(timeOffset, startTime, track.SmoothedPoints)
 
 	// --- Calculations ---
-	var speed, slope, currentDistance float64
 	pathSoFar := []Point{}
 	for i := 0; i < len(track.Points) && track.Points[i].Timestamp.Before(currentPoint.Timestamp); i++ {
-		if i > 0 {
-			currentDistance += haversine(track.Points[i-1], track.Points[i])
-		}
 		pathSoFar = append(pathSoFar, track.Points[i])
 	}
 	pathSoFar = append(pathSoFar, currentPoint)
 
-	if len(pathSoFar) > 1 {
-		p1 := pathSoFar[len(pathSoFar)-2]
-		p2 := pathSoFar[len(pathSoFar)-1]
-		distDelta := haversine(p1, p2)
-		timeDelta := p2.Timestamp.Sub(p1.Timestamp).Seconds()
-		if timeDelta > 0 {
-			speed = (distDelta * 3600) / timeDelta
-		}
-	}
-
-	// Smoothed Slope
-	if len(pathSoFar) > slopeCalculationPoints {
-		p1 := pathSoFar[len(pathSoFar)-1-slopeCalculationPoints]
-		p2 := pathSoFar[len(pathSoFar)-1]
-		horizDist := haversine(p1, p2) * 1000
-		eleDelta := p2.Ele - p1.Ele
-		if horizDist > 0 {
-			slope = (eleDelta / horizDist) * 100
-		}
-	}
+	speed := currentPoint.Speed
+	slope := currentPoint.Slope
+	currentDistance := currentPoint.Distance
 
 	// --- Map Rendering ---
 	widgetRadiusPx := float64(args.WidgetSize) / 2.0
@@ -705,6 +744,9 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 				Lat: p1.Lat + (p2.Lat-p1.Lat)*ratio,
 				Lon: p1.Lon + (p2.Lon-p1.Lon)*ratio,
 				Ele: p1.Ele + (p2.Ele-p1.Ele)*ratio,
+				Speed: p1.Speed + (p2.Speed-p1.Speed)*ratio,
+				Slope: p1.Slope + (p2.Slope-p1.Slope)*ratio,
+				Distance: p1.Distance + (p2.Distance-p1.Distance)*ratio,
 				Timestamp: targetTime,
 			}
 		}
