@@ -103,15 +103,15 @@ func parseArguments() *Arguments {
 	flag.StringVar(&args.Bitrate, "bitrate", "5M", "Video bitrate (e.g., 5M).")
 	flag.IntVar(&args.Workers, "workers", runtime.NumCPU(), "Number of parallel workers for frame generation.")
 	flag.Float64Var(&args.Framerate, "framerate", 23.976, "Video framerate.")
-	flag.StringVar(&args.MapStyle, "style", "default", "Map style (e.g., default, cyclosm, toner).")
-	flag.IntVar(&args.MapZoom, "map-zoom", 16, "Map zoom level. Default 15 is approx 1km diameter for a 400px widget.")
+	flag.StringVar(&args.MapStyle, "style", "thunderforest", "Map style (e.g., default, cyclosm, toner).")
+	flag.IntVar(&args.MapZoom, "map-zoom", 15, "Map zoom level. Default 15 is approx 1km diameter for a 400px widget.")
 	flag.IntVar(&args.WidgetSize, "widget-size", 600, "Map widget diameter in pixels.")
-	pathWidth := flag.Float64("path-width", 4, "Width of the drawn path.")
+	pathWidth := flag.Float64("path-width", 10, "Width of the drawn path.")
 	flag.StringVar(&pathColorStr, "path-color", "#FF0000", "Color of the drawn path (hex).")
 	flag.StringVar(&borderColorStr, "border-color", "#ff9800", "Color of the map border (hex).")
 	flag.StringVar(&indicatorColorStr, "indicator-color", "#FFFFFF", "Color of the text indicators (hex).")
 	flag.BoolVar(&args.RenderFirstFrame, "render-first-frame", false, "Render only the first frame and save as first_frame.png.")
-	flag.BoolVar(&args.Is2x, "2x", false, "Use 2x tiles.")
+	flag.BoolVar(&args.Is2x, "2x", true, "Use 2x tiles.")
 
 	fmt.Println(os.Args)
 	flag.Parse()
@@ -234,7 +234,11 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 	url = strings.Replace(url, "{x}", strconv.Itoa(x), 1)
 	url = strings.Replace(url, "{y}", strconv.Itoa(y), 1)
 	if args.Is2x {
-		url = strings.Replace(url, ".png", "@2x.png", 1)
+		if strings.Contains("outdoor-v2", url) {
+			url = strings.Replace(url, "outdoor-v2/256", "outdoor-v2", 1)
+		} else {
+			url = strings.Replace(url, ".png", "@2x.png", 1)
+		}
 	}
 
 	req, _ := http.NewRequest("GET", url, nil)
@@ -304,7 +308,7 @@ func main() {
 
 	if args.RenderFirstFrame {
 		log.Println("Rendering first frame only...")
-		img := renderFrame(0, 1, track, args, font)
+		img := renderFrame(200, 1, track, args, font)
 		gg.SavePNG("first_frame.png", img)
 		log.Println("Saved first_frame.png")
 		return
@@ -584,11 +588,11 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	// Shadow (bottom-right)
 	frameDC.SetColor(color.RGBA{R: 0, G: 0, B: 0, A: 80})
 	frameDC.SetLineWidth(borderWidth * 0.75)
-	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/3, mapPosY+widgetRadiusPx+borderWidth/3, widgetRadiusPx, gg.Radians(-45), gg.Radians(135))
+	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/2, mapPosY+widgetRadiusPx+borderWidth/2, widgetRadiusPx, gg.Radians(-45), gg.Radians(135))
 	frameDC.Stroke()
 	// Highlight (top-left)
 	frameDC.SetColor(color.RGBA{R: 255, G: 255, B: 255, A: 80})
-	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/3, mapPosY+widgetRadiusPx+borderWidth/3, widgetRadiusPx, gg.Radians(135), gg.Radians(315))
+	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/2, mapPosY+widgetRadiusPx+borderWidth/2, widgetRadiusPx, gg.Radians(135), gg.Radians(315))
 	frameDC.Stroke()
 	// Main Border
 	frameDC.SetColor(args.BorderColor)
@@ -617,10 +621,10 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	speedBlockWidth := widgetWidth / 3.0
 	
 	speedIconX := speedBlockX + iconSize/2
-	speedIconY := row1Y - 1.25 * valueFontSize
+	speedIconY := row1Y - 1.15 * valueFontSize
 	drawSpeedIcon(frameDC, speedIconX, speedIconY, iconSize, iconLineWidth)
 
-	speedValueText := fmt.Sprintf("%.1f", speed)
+	speedValueText := fmt.Sprintf("%.0f", math.Round(speed))
 	speedUnitText := " km/h"
 	
 	frameDC.SetFontFace(valueFace)
@@ -629,7 +633,8 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	unitWidth, _ := frameDC.MeasureString(speedUnitText)
 
 	totalTextWidth := valueWidth + unitWidth
-	startX := speedBlockX + speedBlockWidth - totalTextWidth
+	//startX := speedBlockX + speedBlockWidth - totalTextWidth
+	startX := speedBlockX  + speedBlockWidth - speedBlockWidth
 
 	frameDC.SetFontFace(valueFace)
 	frameDC.DrawString(speedValueText, startX, row1Y)
