@@ -31,7 +31,6 @@ const (
 	tileCacheDir = "tiles"
 	tileURL      = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 	tileSize     = 256
-	frameRate    = 30
 )
 
 // --- Structs ---
@@ -39,11 +38,11 @@ const (
 type Arguments struct {
 	GpxFile        string
 	OutputFile     string
-	VideoSizeStr   string
 	VideoWidth     int
 	VideoHeight    int
 	Bitrate        string
 	Workers        int
+	Framerate      float64
 	MapZoom        int
 	WidgetSize     int
 	PathWidth      float64
@@ -74,9 +73,9 @@ func parseArguments() *Arguments {
 
 	flag.StringVar(&args.GpxFile, "gpx", "example.gpx", "Path to the GPX file.")
 	flag.StringVar(&args.OutputFile, "o", "output_go.mp4", "Output video file name.")
-	flag.StringVar(&args.VideoSizeStr, "video-size", "640x480", "Video dimensions (e.g., 1920x1080).")
 	flag.StringVar(&args.Bitrate, "bitrate", "5M", "Video bitrate (e.g., 5M).")
 	flag.IntVar(&args.Workers, "workers", runtime.NumCPU(), "Number of parallel workers for frame generation.")
+	flag.Float64Var(&args.Framerate, "framerate", 23.976, "Video framerate.")
 	flag.IntVar(&args.MapZoom, "map-zoom", 15, "Map zoom level. Default 15 is approx 1km diameter for a 400px widget.")
 	flag.IntVar(&args.WidgetSize, "widget-size", 300, "Map widget diameter in pixels.")
 	pathWidth := flag.Float64("path-width", 4, "Width of the drawn path.")
@@ -86,9 +85,10 @@ func parseArguments() *Arguments {
 
 	flag.Parse()
 
-	sizeParts := strings.Split(args.VideoSizeStr, "x")
-	args.VideoWidth, _ = strconv.Atoi(sizeParts[0])
-	args.VideoHeight, _ = strconv.Atoi(sizeParts[1])
+	// Auto-calculate video size
+	args.VideoWidth = args.WidgetSize + 40
+	args.VideoHeight = args.WidgetSize + 180
+
 	args.PathWidth = *pathWidth
 	args.PathColor, _ = parseHexColor(pathColorStr)
 	args.BorderColor, _ = parseHexColor(borderColorStr)
@@ -131,20 +131,12 @@ func parseGpx(filePath string) ([]Point, error) {
 
 // --- Coordinate & Tile Math ---
 
-func deg2num(lat, lon float64, zoom int) (int, int) {
+func deg2num(lat, lon float64, zoom int) (float64, float64) {
 	latRad := lat * math.Pi / 180
 	n := math.Pow(2, float64(zoom))
-	xtile := int((lon + 180) / 360 * n)
-	ytile := int((1 - math.Asinh(math.Tan(latRad))/math.Pi) / 2 * n)
+	xtile := (lon + 180) / 360 * n
+	ytile := (1 - math.Asinh(math.Tan(latRad))/math.Pi) / 2 * n
 	return xtile, ytile
-}
-
-func getPixelCoords(lat, lon float64, zoom int) (float64, float64) {
-	latRad := lat * math.Pi / 180
-	n := math.Pow(2, float64(zoom))
-	x := (lon + 180) / 360 * n
-	y := (1 - math.Asinh(math.Tan(latRad))/math.Pi) / 2 * n
-	return x * tileSize, y * tileSize
 }
 
 // --- Tile Downloading & Caching ---
@@ -198,7 +190,6 @@ func getTileImage(z, x, y int) (image.Image, error) {
 	}
 	defer out.Close()
 
-	// Re-encode to save to disk
 	png.Encode(out, img)
 
 	tileCache.Store(tilePath, img)
@@ -219,7 +210,7 @@ func main() {
 	}
 
 	// --- FFMPEG Setup ---
-	ffmpegCmd := exec.Command("ffmpeg", "-y", "-f", "image2pipe", "-vcodec", "png", "-r", fmt.Sprintf("%d", frameRate), "-i", "-", "-c:v", "libx264", "-b:v", args.Bitrate, "-pix_fmt", "yuva420p", "-r", fmt.Sprintf("%d", frameRate), args.OutputFile)
+	ffmpegCmd := exec.Command("ffmpeg", "-y", "-f", "image2pipe", "-vcodec", "png", "-r", fmt.Sprintf("%f", args.Framerate), "-i", "-", "-c:v", "libx264", "-b:v", args.Bitrate, "-pix_fmt", "yuva420p", "-r", fmt.Sprintf("%f", args.Framerate), args.OutputFile)
 	ffmpegIn, err := ffmpegCmd.StdinPipe()
 	if err != nil {
 		log.Fatalf("Failed to get ffmpeg stdin pipe: %v", err)
@@ -230,13 +221,13 @@ func main() {
 	}
 
 	// --- Prefetch Tiles ---
-	prefetchTiles(points, args.MapZoom)
+	prefetchTiles(points, args)
 
 	// --- Concurrency Setup ---
 	var wg sync.WaitGroup
-	frameChan := make(chan Frame, frameRate*2)
+	frameChan := make(chan Frame, int(args.Framerate)*2)
 	totalDuration := points[len(points)-1].Timestamp.Sub(points[0].Timestamp)
-	totalFrames := int(totalDuration.Seconds() * float64(frameRate))
+	totalFrames := int(totalDuration.Seconds() * args.Framerate)
 
 	// --- Encoder Goroutine ---
 	wg.Add(1)
@@ -269,21 +260,36 @@ func main() {
 	fmt.Printf("\nVideo saved to %s\n", args.OutputFile)
 }
 
-func prefetchTiles(points []Point, zoom int) {
+func prefetchTiles(points []Point, args *Arguments) {
 	log.Println("Prefetching map tiles...")
 	tileCoords := make(map[Tile]struct{})
+	widgetRadiusPx := float64(args.WidgetSize) / 2.0
+
 	for _, p := range points {
-		x, y := deg2num(p.Lat, p.Lon, zoom)
-		for dx := -1; dx <= 1; dx++ {
-			for dy := -1; dy <= 1; dy++ {
-				tileCoords[Tile{X: x + dx, Y: y + dy, Z: zoom}] = struct{}{}
+		worldPx, worldPy := deg2num(p.Lat, p.Lon, args.MapZoom)
+		worldPx *= tileSize
+		worldPy *= tileSize
+
+		px_min := worldPx - widgetRadiusPx
+		py_min := worldPy - widgetRadiusPx
+		px_max := worldPx + widgetRadiusPx
+		py_max := worldPy + widgetRadiusPx
+
+		tx_min := math.Floor(px_min / tileSize)
+		ty_min := math.Floor(py_min / tileSize)
+		tx_max := math.Floor(px_max / tileSize)
+		ty_max := math.Floor(py_max / tileSize)
+
+		for x := int(tx_min); x <= int(tx_max); x++ {
+			for y := int(ty_min); y <= int(ty_max); y++ {
+				tileCoords[Tile{X: x, Y: y, Z: args.MapZoom}] = struct{}{}
 			}
 		}
 	}
 
 	bar := progressbar.Default(int64(len(tileCoords)), "Downloading Tiles")
 	var wg sync.WaitGroup
-	limit := make(chan struct{}, 8) // Limit concurrent downloads
+	limit := make(chan struct{}, 8)
 
 	for tile := range tileCoords {
 		wg.Add(1)
@@ -340,7 +346,7 @@ func generateFrames(frameChan chan<- Frame, points []Point, args *Arguments, tot
 
 func renderFrame(frameNum, totalFrames int, points []Point, args *Arguments, face font.Face) image.Image {
 	startTime := points[0].Timestamp
-	timeOffset := float64(frameNum) / float64(frameRate)
+	timeOffset := float64(frameNum) / args.Framerate
 	currentPoint := findPointForTime(timeOffset, startTime, points)
 
 	// --- Calculations ---
@@ -369,30 +375,46 @@ func renderFrame(frameNum, totalFrames int, points []Point, args *Arguments, fac
 	}
 
 	// --- Map Rendering ---
-	centerX, centerY := deg2num(currentPoint.Lat, currentPoint.Lon, args.MapZoom)
-	mapImage := image.NewRGBA(image.Rect(0, 0, tileSize*3, tileSize*3))
-	for dx := -1; dx <= 1; dx++ {
-		for dy := -1; dy <= 1; dy++ {
-			tileImg, _ := getTileImage(args.MapZoom, centerX+dx, centerY+dy)
+	widgetRadiusPx := float64(args.WidgetSize) / 2.0
+	worldPx, worldPy := deg2num(currentPoint.Lat, currentPoint.Lon, args.MapZoom)
+	worldPx *= tileSize
+	worldPy *= tileSize
+
+	px_min := worldPx - widgetRadiusPx - tileSize // Add padding
+	py_min := worldPy - widgetRadiusPx - tileSize
+	px_max := worldPx + widgetRadiusPx + tileSize
+	py_max := worldPy + widgetRadiusPx + tileSize
+
+	tx_min := math.Floor(px_min / tileSize)
+	ty_min := math.Floor(py_min / tileSize)
+	tx_max := math.Floor(px_max / tileSize)
+	ty_max := math.Floor(py_max / tileSize)
+
+	mapWidth := (int(tx_max) - int(tx_min) + 1) * tileSize
+	mapHeight := (int(ty_max) - int(ty_min) + 1) * tileSize
+	mapImage := image.NewRGBA(image.Rect(0, 0, mapWidth, mapHeight))
+	mapDC := gg.NewContextForRGBA(mapImage)
+
+	for x := int(tx_min); x <= int(tx_max); x++ {
+		for y := int(ty_min); y <= int(ty_max); y++ {
+			tileImg, _ := getTileImage(args.MapZoom, x, y)
 			if tileImg != nil {
-				gg.NewContextForRGBA(mapImage).DrawImage(tileImg, (dx+1)*tileSize, (dy+1)*tileSize)
+				mapDC.DrawImage(tileImg, (x-int(tx_min))*tileSize, (y-int(ty_min))*tileSize)
 			}
 		}
 	}
 
-	mapDC := gg.NewContextForRGBA(mapImage)
-	px, py := getPixelCoords(currentPoint.Lat, currentPoint.Lon, args.MapZoom)
-	centerPxOnMap := (px - float64(centerX-1)*tileSize)
-	centerPyOnMap := (py - float64(centerY-1)*tileSize)
+	centerPxOnMap := worldPx - (tx_min * tileSize)
+	centerPyOnMap := worldPy - (ty_min * tileSize)
 
 	// Path
 	if len(pathSoFar) > 1 {
 		mapDC.SetColor(args.PathColor)
 		mapDC.SetLineWidth(args.PathWidth)
 		for i := 1; i < len(pathSoFar); i++ {
-			p1x, p1y := getPixelCoords(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, args.MapZoom)
-			p2x, p2y := getPixelCoords(pathSoFar[i].Lat, pathSoFar[i].Lon, args.MapZoom)
-			mapDC.DrawLine(p1x-float64(centerX-1)*tileSize, p1y-float64(centerY-1)*tileSize, p2x-float64(centerX-1)*tileSize, p2y-float64(centerY-1)*tileSize)
+			p1x, p1y := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, args.MapZoom)
+			p2x, p2y := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, args.MapZoom)
+			mapDC.DrawLine((p1x-tx_min)*tileSize, (p1y-ty_min)*tileSize, (p2x-tx_min)*tileSize, (p2y-ty_min)*tileSize)
 			mapDC.Stroke()
 		}
 	}
@@ -407,23 +429,22 @@ func renderFrame(frameNum, totalFrames int, points []Point, args *Arguments, fac
 	mapDC.Stroke()
 
 	// Crop circular widget
-	widgetRadius := float64(args.WidgetSize / 2)
-	
 	mask := gg.NewContext(args.WidgetSize, args.WidgetSize)
-	mask.DrawCircle(widgetRadius, widgetRadius, widgetRadius)
+	mask.DrawCircle(widgetRadiusPx, widgetRadiusPx, widgetRadiusPx)
 	mask.Clip()
-	mask.DrawImage(mapDC.Image(), -int(centerPxOnMap-widgetRadius), -int(centerPyOnMap-widgetRadius))
+	mask.DrawImage(mapDC.Image(), -int(centerPxOnMap-widgetRadiusPx), -int(centerPyOnMap-widgetRadiusPx))
 	
 	// --- Final Frame Composition ---
 	frameDC := gg.NewContext(args.VideoWidth, args.VideoHeight)
-	mapPosX := float64(args.VideoWidth - args.WidgetSize - 20)
-	mapPosY := float64(args.VideoHeight - args.WidgetSize - 120)
+	mapPosX := float64(20)
+	mapPosY := float64(20)
 	frameDC.DrawImage(mask.Image(), int(mapPosX), int(mapPosY))
 
 	// Border
+	borderWidth := float64(args.WidgetSize) * 0.04
 	frameDC.SetColor(args.BorderColor)
-	frameDC.SetLineWidth(3)
-	frameDC.DrawCircle(mapPosX+widgetRadius, mapPosY+widgetRadius, widgetRadius)
+	frameDC.SetLineWidth(borderWidth)
+	frameDC.DrawCircle(mapPosX+widgetRadiusPx, mapPosY+widgetRadiusPx, widgetRadiusPx)
 	frameDC.Stroke()
 
 	// Indicators
