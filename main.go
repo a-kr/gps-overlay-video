@@ -227,23 +227,31 @@ func preprocessGpxPoints(points []Point) []Point {
 		if totalTime > 0 {
 			smoothed[i].Speed = (totalDist * 3600) / totalTime
 		}
+	}
 
-		if i > slopeCalculationPoints {
-			var totalSlope float64
-			var numSlopes int
-			for j := i - slopeCalculationPoints; j < i; j++ {
-				p1_slope := smoothed[j]
-				p2_slope := smoothed[j+1]
-				horizDist := haversine(p1_slope, p2_slope) * 1000
-				eleDelta := p2_slope.Ele - p1_slope.Ele
-				if horizDist > 0 {
-					totalSlope += (eleDelta / horizDist) * 100
-					numSlopes++
-				}
+	// --- Slope Calculation (over 50m distance) ---
+	slopeStartIndex := 0
+	for i := 1; i < len(smoothed); i++ {
+		// Find the start point for our 50m slope calculation window
+		for slopeStartIndex < i && (smoothed[i].Distance-smoothed[slopeStartIndex].Distance)*1000 > 50 {
+			slopeStartIndex++
+		}
+
+		if slopeStartIndex > 0 {
+			p_start := smoothed[slopeStartIndex-1]
+			p_end := smoothed[i]
+
+			distance_delta := (p_end.Distance - p_start.Distance) * 1000 // meters
+			elevation_delta := p_end.Ele - p_start.Ele
+
+			if distance_delta > 1 { // Only calculate if distance is meaningful
+				smoothed[i].Slope = (elevation_delta / distance_delta) * 100
+			} else {
+				smoothed[i].Slope = smoothed[i-1].Slope // Carry over previous slope if not moving
 			}
-			if numSlopes > 0 {
-				smoothed[i].Slope = totalSlope / float64(numSlopes)
-			}
+		} else {
+			// Not enough distance covered yet for a 50m window
+			smoothed[i].Slope = 0
 		}
 	}
 
