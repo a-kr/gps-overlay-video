@@ -1,7 +1,0 @@
-gpxpy
-requests
-Pillow
-tqdm
-numpy
-ffmpeg-python
-haversine
