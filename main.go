@@ -29,11 +29,16 @@ import (
 
 const (
 	tileCacheDir = "tiles"
-	tileURL      = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 	tileSize     = 256
 )
 
 // --- Structs ---
+
+type MapStyle struct {
+	Name    string
+	URL     string
+	Headers map[string]string
+}
 
 type Arguments struct {
 	GpxFile        string
@@ -43,6 +48,7 @@ type Arguments struct {
 	Bitrate        string
 	Workers        int
 	Framerate      float64
+	MapStyle       string
 	MapZoom        int
 	WidgetSize     int
 	PathWidth      float64
@@ -65,6 +71,16 @@ type Tile struct {
 	X, Y, Z int
 }
 
+var mapStyles = map[string]MapStyle{
+	"default":       {Name: "default", URL: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"},
+	"cyclosm":       {Name: "cyclosm", URL: "https://c.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png"},
+	"toner":         {Name: "toner", URL: "https://tiles.stadiamaps.com/tiles/stamen_toner/{z}/{x}/{y}.png", Headers: map[string]string{"Referer": "https://mc.bbbike.org/"}},
+	"clockwork":     {Name: "clockwork", URL: "https://maps.clockworkmicro.com/streets/v1/raster/{z}/{x}/{y}?x-api-key=2d33HqvhuU3z6lPsPOqQR6Zwl2LQ2pmo9NnWbboL"},
+	"thunderforest": {Name: "thunderforest", URL: "https://c.tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey=6170aad10dfd42a38d4d8c709a536f38"},
+	"positron":      {Name: "positron", URL: "https://d.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"},
+	"outdoor":       {Name: "outdoor", URL: "https://api.maptiler.com/maps/outdoor-v2/256/{z}/{x}/{y}.png?key=jsK0th32A1xWq2x6QeVu"},
+}
+
 // --- Argument Parsing ---
 
 func parseArguments() *Arguments {
@@ -76,6 +92,7 @@ func parseArguments() *Arguments {
 	flag.StringVar(&args.Bitrate, "bitrate", "5M", "Video bitrate (e.g., 5M).")
 	flag.IntVar(&args.Workers, "workers", runtime.NumCPU(), "Number of parallel workers for frame generation.")
 	flag.Float64Var(&args.Framerate, "framerate", 23.976, "Video framerate.")
+	flag.StringVar(&args.MapStyle, "style", "default", "Map style (e.g., default, cyclosm, toner).")
 	flag.IntVar(&args.MapZoom, "map-zoom", 15, "Map zoom level. Default 15 is approx 1km diameter for a 400px widget.")
 	flag.IntVar(&args.WidgetSize, "widget-size", 300, "Map widget diameter in pixels.")
 	pathWidth := flag.Float64("path-width", 4, "Width of the drawn path.")
@@ -143,8 +160,9 @@ func deg2num(lat, lon float64, zoom int) (float64, float64) {
 
 var tileCache sync.Map // Concurrent map for caching tiles
 
-func getTileImage(z, x, y int) (image.Image, error) {
-	tilePath := filepath.Join(tileCacheDir, strconv.Itoa(z), strconv.Itoa(x), fmt.Sprintf("%d.png", y))
+func getTileImage(style string, z, x, y int) (image.Image, error) {
+	styleInfo := mapStyles[style]
+	tilePath := filepath.Join(tileCacheDir, styleInfo.Name, strconv.Itoa(z), strconv.Itoa(x), fmt.Sprintf("%d.png", y))
 
 	if img, ok := tileCache.Load(tilePath); ok {
 		return img.(image.Image), nil
@@ -165,12 +183,15 @@ func getTileImage(z, x, y int) (image.Image, error) {
 	}
 
 	// Download
-	url := strings.Replace(tileURL, "{z}", strconv.Itoa(z), 1)
+	url := strings.Replace(styleInfo.URL, "{z}", strconv.Itoa(z), 1)
 	url = strings.Replace(url, "{x}", strconv.Itoa(x), 1)
 	url = strings.Replace(url, "{y}", strconv.Itoa(y), 1)
 
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "GpsOverlayVideoGo/0.1")
+	for k, v := range styleInfo.Headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != 200 {
@@ -296,7 +317,7 @@ func prefetchTiles(points []Point, args *Arguments) {
 		limit <- struct{}{}
 		go func(t Tile) {
 			defer wg.Done()
-			getTileImage(t.Z, t.X, t.Y)
+			getTileImage(args.MapStyle, t.Z, t.X, t.Y)
 			bar.Add(1)
 			<-limit
 		}(tile)
@@ -380,10 +401,10 @@ func renderFrame(frameNum, totalFrames int, points []Point, args *Arguments, fac
 	worldPx *= tileSize
 	worldPy *= tileSize
 
-	px_min := worldPx - widgetRadiusPx - tileSize // Add padding
-	py_min := worldPy - widgetRadiusPx - tileSize
-	px_max := worldPx + widgetRadiusPx + tileSize
-	py_max := worldPy + widgetRadiusPx + tileSize
+	px_min := worldPx - widgetRadiusPx
+	py_min := worldPy - widgetRadiusPx
+	px_max := worldPx + widgetRadiusPx
+	py_max := worldPy + widgetRadiusPx
 
 	tx_min := math.Floor(px_min / tileSize)
 	ty_min := math.Floor(py_min / tileSize)
@@ -397,7 +418,7 @@ func renderFrame(frameNum, totalFrames int, points []Point, args *Arguments, fac
 
 	for x := int(tx_min); x <= int(tx_max); x++ {
 		for y := int(ty_min); y <= int(ty_max); y++ {
-			tileImg, _ := getTileImage(args.MapZoom, x, y)
+			tileImg, _ := getTileImage(args.MapStyle, args.MapZoom, x, y)
 			if tileImg != nil {
 				mapDC.DrawImage(tileImg, (x-int(tx_min))*tileSize, (y-int(ty_min))*tileSize)
 			}
