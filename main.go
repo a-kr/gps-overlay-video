@@ -1,8 +1,7 @@
-
-
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"image"
@@ -14,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,23 +37,24 @@ const (
 // --- Structs ---
 
 type Arguments struct {
-	GpxFile       string
-	OutputFile    string
-	VideoSizeStr  string
-	VideoWidth    int
-	VideoHeight   int
-	Bitrate       string
-	MapZoom       int
-	WidgetSize    int
-	PathWidth     float64
-	PathColor     color.Color
-	BorderColor   color.Color
+	GpxFile        string
+	OutputFile     string
+	VideoSizeStr   string
+	VideoWidth     int
+	VideoHeight    int
+	Bitrate        string
+	Workers        int
+	MapZoom        int
+	WidgetSize     int
+	PathWidth      float64
+	PathColor      color.Color
+	BorderColor    color.Color
 	IndicatorColor color.Color
 }
 
 type Frame struct {
 	Number int
-	Image  image.Image
+	Data   []byte
 }
 
 type Point struct {
@@ -75,6 +76,7 @@ func parseArguments() *Arguments {
 	flag.StringVar(&args.OutputFile, "o", "output_go.mp4", "Output video file name.")
 	flag.StringVar(&args.VideoSizeStr, "video-size", "640x480", "Video dimensions (e.g., 1920x1080).")
 	flag.StringVar(&args.Bitrate, "bitrate", "5M", "Video bitrate (e.g., 5M).")
+	flag.IntVar(&args.Workers, "workers", runtime.NumCPU(), "Number of parallel workers for frame generation.")
 	flag.IntVar(&args.MapZoom, "map-zoom", 15, "Map zoom level. Default 15 is approx 1km diameter for a 400px widget.")
 	flag.IntVar(&args.WidgetSize, "widget-size", 300, "Map widget diameter in pixels.")
 	pathWidth := flag.Float64("path-width", 4, "Width of the drawn path.")
@@ -246,8 +248,9 @@ func main() {
 			if !ok {
 				break
 			}
-			if err := png.Encode(ffmpegIn, frame.Image); err != nil {
-				log.Printf("Error encoding frame %d: %v", frame.Number, err)
+			_, err := ffmpegIn.Write(frame.Data)
+			if err != nil {
+				log.Printf("Error writing to ffmpeg: %v", err)
 			}
 			bar.Add(1)
 		}
@@ -297,7 +300,6 @@ func prefetchTiles(points []Point, zoom int) {
 
 func generateFrames(frameChan chan<- Frame, points []Point, args *Arguments, totalFrames int) {
 	var wg sync.WaitGroup
-	numWorkers := 8
 	tasks := make(chan int, totalFrames)
 	for i := 0; i < totalFrames; i++ {
 		tasks <- i
@@ -309,14 +311,27 @@ func generateFrames(frameChan chan<- Frame, points []Point, args *Arguments, tot
 		log.Fatal(err)
 	}
 
-	for i := 0; i < numWorkers; i++ {
+	for i := 0; i < args.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			face := truetype.NewFace(font, &truetype.Options{Size: 32})
+			pngBuffer := new(bytes.Buffer)
+
 			for frameNum := range tasks {
 				img := renderFrame(frameNum, totalFrames, points, args, face)
-				frameChan <- Frame{Number: frameNum, Image: img}
+				
+				pngBuffer.Reset()
+				err := png.Encode(pngBuffer, img)
+				if err != nil {
+					log.Printf("Failed to encode frame %d: %v", frameNum, err)
+					continue
+				}
+
+				frameData := make([]byte, pngBuffer.Len())
+				copy(frameData, pngBuffer.Bytes())
+
+				frameChan <- Frame{Number: frameNum, Data: frameData}
 			}
 		}()
 	}
