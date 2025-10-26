@@ -34,6 +34,7 @@ const (
 	avgSpeedWindow         = 15 * time.Second
 	dynMapScaleMinSpeedKmh = 17.0
 	dynMapScaleMaxSpeedKmh = 26.0
+	startMapScaleIfZoomIn  = 5.0
 )
 
 // --- Structs ---
@@ -64,6 +65,7 @@ type Arguments struct {
 	TileSize         int
 	DebugSlope       bool
 	DynMapScale      bool
+	ZoomInAtStart    bool
 }
 
 type Frame struct {
@@ -118,6 +120,7 @@ func parseArguments() *Arguments {
 	flag.BoolVar(&args.Is2x, "2x", true, "Use 2x tiles.")
 	flag.BoolVar(&args.DebugSlope, "debug-slope", false, "Debug slope calculation.")
 	flag.BoolVar(&args.DynMapScale, "dyn-map-scale", false, "Enable dynamic map scaling based on speed.")
+	flag.BoolVar(&args.ZoomInAtStart, "zoom-in-at-start", false, "Enable zoom-in effect at the start of the video.")
 
 	fmt.Println(os.Args)
 	flag.Parse()
@@ -279,7 +282,7 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 
 	// --- Dynamic Map Scale Calculation ---
 	for i := range smoothed {
-		smoothed[i].MapScale = 1.0
+		speedMapScale := 1.0
 		if args.DynMapScale {
 			avgSpeed := smoothed[i].AvgSpeed
 			if avgSpeed > dynMapScaleMinSpeedKmh {
@@ -287,7 +290,24 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 				if factor > 1.0 {
 					factor = 1.0
 				}
-				smoothed[i].MapScale = 1.0 + factor
+				speedMapScale = 1.0 + factor
+			}
+		}
+		smoothed[i].MapScale = speedMapScale
+
+		if args.ZoomInAtStart && args.Framerate > 0 {
+			zoomInDurationSeconds := 20.0
+			zoomInDurationFrames := int(zoomInDurationSeconds * args.Framerate)
+			
+			// Calculate the frame number for the current point
+			timeSinceStart := smoothed[i].Timestamp.Sub(smoothed[0].Timestamp).Seconds()
+			currentFrameNum := int(timeSinceStart * args.Framerate)
+
+			if currentFrameNum < zoomInDurationFrames {
+				// Interpolate MapScale from 3.0 down to speedMapScale
+				progress := float64(currentFrameNum) / float64(zoomInDurationFrames)
+				// Linear interpolation: startValue + progress * (endValue - startValue)
+				smoothed[i].MapScale = startMapScaleIfZoomIn + progress * (speedMapScale - startMapScaleIfZoomIn)
 			}
 		}
 	}
