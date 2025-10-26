@@ -34,7 +34,7 @@ const (
 	avgSpeedWindow         = 15 * time.Second
 	dynMapScaleMinSpeedKmh = 17.0
 	dynMapScaleMaxSpeedKmh = 26.0
-	startMapScaleIfZoomIn  = 5.0
+	startMapScaleIfZoomIn  = 8.0
 )
 
 // --- Structs ---
@@ -825,8 +825,10 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 
 	// Apply dynamic scaling
 	if args.DynMapScale && mapScale != 1.0 {
+		zoomOutLevels := int(math.Floor(math.Log2(mapScale)))
+		residualMapScale := mapScale / math.Pow(2, float64(zoomOutLevels))
 		mask.Translate(widgetRadiusPx, widgetRadiusPx)
-		mask.Scale(1/mapScale, 1/mapScale)
+		mask.Scale(1/residualMapScale, 1/residualMapScale)
 		mask.Translate(-widgetRadiusPx, -widgetRadiusPx)
 	}
 
