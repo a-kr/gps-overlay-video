@@ -34,7 +34,7 @@ const (
 	avgSpeedWindow         = 15 * time.Second
 	dynMapScaleMinSpeedKmh = 17.0
 	dynMapScaleMaxSpeedKmh = 26.0
-	startMapScaleIfZoomIn  = 8.0
+	
 )
 
 // --- Structs ---
@@ -46,26 +46,26 @@ type MapStyle struct {
 }
 
 type Arguments struct {
-	GpxFile          string
-	OutputFile       string
-	VideoWidth       int
-	VideoHeight      int
-	Bitrate          string
-	Workers          int
-	Framerate        float64
-	MapStyle         string
-	MapZoom          int
-	WidgetSize       int
-	PathWidth        float64
-	PathColor        color.Color
-	BorderColor      color.Color
-	IndicatorColor   color.Color
-	RenderFirstFrame bool
-	Is2x             bool
-	TileSize         int
-	DebugSlope       bool
-	DynMapScale      bool
-	ZoomInAtStart    bool
+	GpxFile             string
+	OutputFile          string
+	VideoWidth          int
+	VideoHeight         int
+	Bitrate             string
+	Workers             int
+	Framerate           float64
+	MapStyle            string
+	MapZoom             int
+	WidgetSize          int
+	PathWidth           float64
+	PathColor           color.Color
+	BorderColor         color.Color
+	IndicatorColor      color.Color
+	RenderFirstFrame    bool
+	Is2x                bool
+	TileSize            int
+	Debug               bool
+	DynMapScale         bool
+	TrackAdjustmentFile string
 }
 
 type Frame struct {
@@ -75,7 +75,7 @@ type Frame struct {
 
 type Point struct {
 	Lat, Lon, Ele, Speed, Slope, Distance, SmoothedSlope, AvgSpeed, MapScale float64
-	Timestamp     time.Time
+	Timestamp time.Time
 }
 
 type Tile struct {
@@ -86,6 +86,18 @@ type Track struct {
 	Points         []Point
 	SmoothedPoints []Point
 	TotalDistance  float64
+}
+
+type TrackAdjustmentSpec struct {
+	PointSpec string
+	Scale     float64
+	Duration  *time.Duration
+}
+
+type ScaleChange struct {
+	PointIndex         int
+	TargetScale        float64
+	TransitionDuration time.Duration
 }
 
 var mapStyles = map[string]MapStyle{
@@ -118,13 +130,12 @@ func parseArguments() *Arguments {
 	flag.StringVar(&indicatorColorStr, "indicator-color", "#FFFFFF", "Color of the text indicators (hex).")
 	flag.BoolVar(&args.RenderFirstFrame, "render-first-frame", false, "Render only the first frame and save as first_frame.png.")
 	flag.BoolVar(&args.Is2x, "2x", true, "Use 2x tiles.")
-	flag.BoolVar(&args.DebugSlope, "debug-slope", false, "Debug slope calculation.")
+	flag.BoolVar(&args.Debug, "debug", false, "Debug slope calculation.")
 	flag.BoolVar(&args.DynMapScale, "dyn-map-scale", false, "Enable dynamic map scaling based on speed.")
-	flag.BoolVar(&args.ZoomInAtStart, "zoom-in-at-start", false, "Enable zoom-in effect at the start of the video.")
+	flag.StringVar(&args.TrackAdjustmentFile, "track-adjustment-file", "", "File with track adjustment specifications.")
 
 	fmt.Println(os.Args)
 	flag.Parse()
-
 
 	// Auto-calculate video size
 	args.VideoWidth = args.WidgetSize + 40
@@ -203,6 +214,192 @@ func parseGpx(filePath string) ([]Point, error) {
 
 	return points, nil
 }
+
+func parseTrackAdjustmentFile(filePath string) ([]TrackAdjustmentSpec, error) {
+	if filePath == "" {
+		return nil, nil
+	}
+
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read track adjustment file: %w", err)
+	}
+
+	var specs []TrackAdjustmentSpec
+	lines := strings.Split(string(content), "\n")
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("invalid format on line %d: %s", i+1, line)
+		}
+
+		spec := TrackAdjustmentSpec{PointSpec: parts[0]}
+		var scaleFound bool
+
+		for _, part := range parts[1:] {
+			if strings.HasPrefix(part, "scale=") {
+				scaleStr := strings.TrimPrefix(part, "scale=")
+				scale, err := strconv.ParseFloat(scaleStr, 64)
+				if err != nil {
+					return nil, fmt.Errorf("invalid scale value on line %d: %s", i+1, line)
+				}
+				validScales := []float64{1, 2, 4, 8, 16, 32}
+				isValid := false
+				for _, vs := range validScales {
+					if scale == vs {
+						isValid = true
+						break
+					}
+				}
+				if !isValid {
+					return nil, fmt.Errorf("invalid scale value on line %d: %f. Must be one of 1, 2, 4, 8, 16, 32", i+1, scale)
+				}
+				spec.Scale = scale
+				scaleFound = true
+			} else if strings.HasPrefix(part, "duration=") {
+				durationStr := strings.TrimPrefix(part, "duration=")
+				durationSec, err := strconv.ParseFloat(durationStr, 64)
+				if err != nil {
+					return nil, fmt.Errorf("invalid duration value on line %d: %s", i+1, line)
+				}
+				duration := time.Duration(durationSec * float64(time.Second))
+				spec.Duration = &duration
+			} else {
+				return nil, fmt.Errorf("unknown parameter on line %d: %s", i+1, part)
+			}
+		}
+
+		if !scaleFound {
+			return nil, fmt.Errorf("scale parameter not found on line %d: %s", i+1, line)
+		}
+
+		specs = append(specs, spec)
+	}
+
+	return specs, nil
+}
+
+func applyTrackAdjustments(points []Point, specs []TrackAdjustmentSpec) ([]float64, error) {
+	scaleMultipliers := make([]float64, len(points))
+	for i := range scaleMultipliers {
+		scaleMultipliers[i] = 1.0
+	}
+
+	if len(specs) == 0 {
+		return scaleMultipliers, nil
+	}
+
+	// --- Resolve specs to point indices ---
+	scaleChanges := make([]ScaleChange, 0)
+	lastDistance := 0.0
+	lastTime := 0.0
+	startTime := points[0].Timestamp
+
+	for _, spec := range specs {
+		var pointIndex int = -1
+		transitionDuration := 20 * time.Second
+		if spec.Duration != nil {
+			transitionDuration = *spec.Duration
+		}
+
+		if spec.PointSpec == "0" {
+			pointIndex = 0
+		} else if strings.HasSuffix(spec.PointSpec, "km") {
+			valStr := strings.TrimSuffix(strings.TrimPrefix(spec.PointSpec, "+"), "km")
+			dist, err := strconv.ParseFloat(valStr, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid distance spec: %s", spec.PointSpec)
+			}
+
+			if strings.HasPrefix(spec.PointSpec, "+") {
+				dist += lastDistance
+			}
+			lastDistance = dist
+
+			for i, p := range points {
+				if p.Distance >= dist {
+					pointIndex = i
+					break
+				}
+			}
+		} else if strings.HasSuffix(spec.PointSpec, "s") {
+			valStr := strings.TrimSuffix(strings.TrimPrefix(spec.PointSpec, "+"), "s")
+			timeOffset, err := strconv.ParseFloat(valStr, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid time spec: %s", spec.PointSpec)
+			}
+
+			if strings.HasPrefix(spec.PointSpec, "+") {
+				timeOffset += lastTime
+			}
+			lastTime = timeOffset
+
+			targetTime := startTime.Add(time.Duration(timeOffset * float64(time.Second)))
+			for i, p := range points {
+				if !p.Timestamp.Before(targetTime) {
+					pointIndex = i
+					break
+				}
+			}
+		}
+
+		if pointIndex != -1 {
+			scaleChanges = append(scaleChanges, ScaleChange{PointIndex: pointIndex, TargetScale: spec.Scale, TransitionDuration: transitionDuration})
+		} else {
+			log.Printf("Warning: could not find point for spec '%s'", spec.PointSpec)
+		}
+	}
+
+	// --- Apply scale changes to the multiplier slice ---
+	currentScale := 1.0
+	changeIdx := 0
+
+	if len(scaleChanges) > 0 && scaleChanges[0].PointIndex == 0 {
+		currentScale = scaleChanges[0].TargetScale
+		changeIdx = 1
+	}
+
+	for i := range scaleMultipliers {
+		scaleMultipliers[i] = currentScale
+	}
+
+	for i := changeIdx; i < len(scaleChanges); i++ {
+		change := scaleChanges[i]
+		prevChange := scaleChanges[i-1]
+		prevScale := prevChange.TargetScale
+
+		transitionDuration := change.TransitionDuration
+		transitionStartIndex := change.PointIndex
+		transitionStartTime := points[transitionStartIndex].Timestamp
+
+		for j := transitionStartIndex; j < len(points); j++ {
+			if i+1 < len(scaleChanges) && j >= scaleChanges[i+1].PointIndex {
+				break
+			}
+
+			p := &points[j]
+			timeSinceTransitionStart := p.Timestamp.Sub(transitionStartTime)
+
+			if timeSinceTransitionStart < transitionDuration {
+				progress := float64(timeSinceTransitionStart) / float64(transitionDuration)
+				if progress < 0 { progress = 0 } // Clamp progress
+				interpolatedScale := prevScale + progress*(change.TargetScale-prevScale)
+				scaleMultipliers[j] = interpolatedScale
+			} else {
+				scaleMultipliers[j] = change.TargetScale
+			}
+		}
+	}
+
+	return scaleMultipliers, nil
+}
+
 
 func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 	if len(points) < 2 {
@@ -294,22 +491,19 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 			}
 		}
 		smoothed[i].MapScale = speedMapScale
+	}
 
-		if args.ZoomInAtStart && args.Framerate > 0 {
-			zoomInDurationSeconds := 20.0
-			zoomInDurationFrames := int(zoomInDurationSeconds * args.Framerate)
-			
-			// Calculate the frame number for the current point
-			timeSinceStart := smoothed[i].Timestamp.Sub(smoothed[0].Timestamp).Seconds()
-			currentFrameNum := int(timeSinceStart * args.Framerate)
-
-			if currentFrameNum < zoomInDurationFrames {
-				// Interpolate MapScale from 3.0 down to speedMapScale
-				progress := float64(currentFrameNum) / float64(zoomInDurationFrames)
-				// Linear interpolation: startValue + progress * (endValue - startValue)
-				smoothed[i].MapScale = startMapScaleIfZoomIn + progress * (speedMapScale - startMapScaleIfZoomIn)
-			}
-		}
+	// --- Track Adjustments ---
+	adjSpecs, err := parseTrackAdjustmentFile(args.TrackAdjustmentFile)
+	if err != nil {
+		log.Fatalf("Error processing track adjustment file: %v", err)
+	}
+	scaleMultipliers, err := applyTrackAdjustments(smoothed, adjSpecs)
+	if err != nil {
+		log.Fatalf("Error applying track adjustments: %v", err)
+	}
+	for i := range smoothed {
+		smoothed[i].MapScale *= scaleMultipliers[i]
 	}
 
 	// --- Slope Calculation (centered 50m distance) ---
@@ -511,7 +705,7 @@ func main() {
 		track.TotalDistance += haversine(track.Points[i-1], track.Points[i])
 	}
 
-	if args.DebugSlope {
+	if args.Debug {
 		for i := 1; i < len(track.SmoothedPoints); i++ {
 			p := track.SmoothedPoints[i]
 			
