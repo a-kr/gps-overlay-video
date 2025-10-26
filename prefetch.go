@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"image/color"
 	"image/png"
 	"log"
 	"math"
@@ -76,6 +77,9 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 		if args.Is2x && (img.Bounds().Dx() != 512 || img.Bounds().Dy() != 512) {
 			return nil, fmt.Errorf("style %s does not support 2x: tile is %dx%d", style, img.Bounds().Dx(), img.Bounds().Dy())
 		}
+		if args.MapBrightness != 0 || args.MapContrast != 1 {
+			img = adjustBrightnessContrast(img, args.MapBrightness, args.MapContrast)
+		}
 		tileCache.Store(tilePath, img)
 		return img, nil
 	}
@@ -116,6 +120,10 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 		return nil, err
 	}
 
+	if args.MapBrightness != 0 || args.MapContrast != 1 {
+		img = adjustBrightnessContrast(img, args.MapBrightness, args.MapContrast)
+	}
+
 	if args.Is2x && (img.Bounds().Dx() != 512 || img.Bounds().Dy() != 512) {
 		return nil, fmt.Errorf("style %s does not support 2x: downloaded tile is %dx%d", style, img.Bounds().Dx(), img.Bounds().Dy())
 	}
@@ -136,6 +144,35 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 
 	tileCache.Store(tilePath, img)
 	return img, nil
+}
+
+func adjustBrightnessContrast(img image.Image, brightness, contrast float64) image.Image {
+	bounds := img.Bounds()
+	newImg := image.NewRGBA(bounds)
+
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+
+			// Adjust brightness
+			r_new := float64(r>>8) + brightness*255
+			g_new := float64(g>>8) + brightness*255
+			b_new := float64(b>>8) + brightness*255
+
+			// Adjust contrast
+			r_new = (r_new-128)*contrast + 128
+			g_new = (g_new-128)*contrast + 128
+			b_new = (b_new-128)*contrast + 128
+
+			// Clamp values
+			r_new = math.Max(0, math.Min(255, r_new))
+			g_new = math.Max(0, math.Min(255, g_new))
+			b_new = math.Max(0, math.Min(255, b_new))
+
+			newImg.Set(x, y, color.RGBA{R: uint8(r_new), G: uint8(g_new), B: uint8(b_new), A: uint8(a >> 8)})
+		}
+	}
+	return newImg
 }
 
 func getAllTilesForTrack(track *Track, args *Arguments) map[Tile]struct{} {

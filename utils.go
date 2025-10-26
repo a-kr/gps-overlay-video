@@ -34,6 +34,8 @@ type Arguments struct {
 	TrackAdjustmentFile string
 	From                string
 	To                  string
+	MapBrightness       float64
+	MapContrast         float64
 }
 
 // --- Argument Parsing ---
@@ -50,6 +52,8 @@ func parseArguments() *Arguments {
 	flag.StringVar(&args.MapStyle, "style", "thunderforest", "Map style (e.g., default, cyclosm, toner).")
 	flag.IntVar(&args.MapZoom, "map-zoom", 15, "Map zoom level. Default 15 is approx 1km diameter for a 400px widget.")
 	flag.IntVar(&args.WidgetSize, "widget-size", 600, "Map widget diameter in pixels.")
+	flag.Float64Var(&args.MapBrightness, "map-brightness", 0, "Map brightness adjustment (-1 to 1), normal 0.")
+	flag.Float64Var(&args.MapContrast, "map-contrast", 1, "Map contrast adjustment (0 to 4), normal 2.")
 	pathWidth := flag.Float64("path-width", 10, "Width of the drawn path.")
 	flag.StringVar(&pathColorStr, "path-color", "#FF0000", "Color of the drawn path (hex).")
 	flag.StringVar(&borderColorStr, "border-color", "#A14F00", "Color of the map border (hex).")

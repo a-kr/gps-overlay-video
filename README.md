@@ -8,5 +8,5 @@ gps_overlay_video
 Пример запуска
 --------------
 ```
-go build && ./gps_overlay_video --bitrate 10M --border-color '#ffac33' -o /mnt/g/tmp/render/overlay1_go_v4_thunderforest.mp4 -style thunderforest --widget-size 600 -2x -map-zoom 14 -gpx example.gpx
+go build && ./gps_overlay_video --bitrate 10M --border-color '#ffac33' -o /mnt/g/tmp/render/overlay1_go_v4_thunderforest.mp4 -style thunderforest --widget-size 600 -2x -map-zoom 14 -map-contrast 2 -map-brightness -0.3 -gpx example.gpx
 ```

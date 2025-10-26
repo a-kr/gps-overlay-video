@@ -212,12 +212,14 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	frameDC.DrawImage(mask.Image(), int(mapPosX), int(mapPosY))
 
 	// 3D Border
+	shadowAlpha := 120
 	borderWidth := float64(args.WidgetSize) * 0.04
-	frameDC.SetColor(color.RGBA{R: 0, G: 0, B: 0, A: 80})
+	frameDC.SetColor(color.RGBA{R: 0, G: 0, B: 0, A: uint8(shadowAlpha)})
 	frameDC.SetLineWidth(borderWidth * 0.75)
 	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/2, mapPosY+widgetRadiusPx+borderWidth/2, widgetRadiusPx, gg.Radians(-45), gg.Radians(135))
 	frameDC.Stroke()
-	frameDC.SetColor(color.RGBA{R: 255, G: 255, B: 255, A: 80})
+	// ...top left:
+	//frameDC.SetColor(color.RGBA{R: 255, G: 255, B: 255, A: uint8(shadowAlpha)})
 	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/2, mapPosY+widgetRadiusPx+borderWidth/2, widgetRadiusPx, gg.Radians(135), gg.Radians(315))
 	frameDC.Stroke()
 	frameDC.SetColor(args.BorderColor)
