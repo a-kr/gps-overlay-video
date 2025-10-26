@@ -1171,6 +1171,48 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	frameDC.DrawCircle(mapPosX+widgetRadiusPx, mapPosY+widgetRadiusPx, widgetRadiusPx)
 	frameDC.Stroke()
 
+	// --- Path and Marker (on top of map) ---
+	widgetCenterX := mapPosX + widgetRadiusPx
+	widgetCenterY := mapPosY + widgetRadiusPx
+
+	// Set clip for path
+	frameDC.Push()
+	frameDC.DrawCircle(widgetCenterX, widgetCenterY, widgetRadiusPx)
+	frameDC.Clip()
+
+	if len(pathSoFar) > 1 {
+		current_world_px, current_world_py := deg2num(currentPoint.Lat, currentPoint.Lon, adjustedMapZoom)
+		frameDC.SetColor(args.PathColor)
+		frameDC.SetLineWidth(args.PathWidth)
+		for i := 1; i < len(pathSoFar); i++ {
+			p1_world_px, p1_world_py := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, adjustedMapZoom)
+			p2_world_px, p2_world_py := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, adjustedMapZoom)
+
+			dx1 := (p1_world_px - current_world_px) * float64(args.TileSize)
+			dy1 := (p1_world_py - current_world_py) * float64(args.TileSize)
+			dx2 := (p2_world_px - current_world_px) * float64(args.TileSize)
+			dy2 := (p2_world_py - current_world_py) * float64(args.TileSize)
+
+			screen_dx1 := dx1 / residualMapScale
+			screen_dy1 := dy1 / residualMapScale
+			screen_dx2 := dx2 / residualMapScale
+			screen_dy2 := dy2 / residualMapScale
+
+			frameDC.DrawLine(widgetCenterX+screen_dx1, widgetCenterY+screen_dy1, widgetCenterX+screen_dx2, widgetCenterY+screen_dy2)
+			frameDC.Stroke()
+		}
+	}
+	frameDC.Pop() // Reset clip
+
+	// Current position marker
+	frameDC.SetColor(color.RGBA{0, 0, 255, 255})
+	frameDC.DrawPoint(widgetCenterX, widgetCenterY, 8)
+	frameDC.Fill()
+	frameDC.SetColor(color.White)
+	frameDC.SetLineWidth(2)
+	frameDC.DrawPoint(widgetCenterX, widgetCenterY, 8)
+	frameDC.Stroke()
+
 	// --- Indicators ---
 	widgetWidth := float64(args.WidgetSize)
 	valueFontSize := widgetWidth / 8.0
