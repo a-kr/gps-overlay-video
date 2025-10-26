@@ -52,9 +52,16 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 
 	// --- Calculations ---
 	pathSoFar := []Point{}
+	// Calculate the timestamp after which the path should be drawn
+	skipUntilTimestamp := segmentStartTime.Add(time.Duration(args.SkipPathSeconds * float64(time.Second)))
+
 	for i := 0; i < len(track.Points) && track.Points[i].Timestamp.Before(currentPoint.Timestamp); i++ {
-		pathSoFar = append(pathSoFar, track.Points[i])
+		// Only add points to pathSoFar if their timestamp is after the skipUntilTimestamp
+		if track.Points[i].Timestamp.After(skipUntilTimestamp) {
+			pathSoFar = append(pathSoFar, track.Points[i])
+		}
 	}
+	// Always add the current point, regardless of skip time, as it represents the current position
 	pathSoFar = append(pathSoFar, currentPoint)
 
 	speed := currentPoint.Speed

@@ -36,6 +36,7 @@ type Arguments struct {
 	To                  string
 	MapBrightness       float64
 	MapContrast         float64
+	SkipPathSeconds     float64
 }
 
 // --- Argument Parsing ---
@@ -54,6 +55,7 @@ func parseArguments() *Arguments {
 	flag.IntVar(&args.WidgetSize, "widget-size", 600, "Map widget diameter in pixels.")
 	flag.Float64Var(&args.MapBrightness, "map-brightness", 0, "Map brightness adjustment (-1 to 1), normal 0.")
 	flag.Float64Var(&args.MapContrast, "map-contrast", 1, "Map contrast adjustment (0 to 4), normal 2.")
+	flag.Float64Var(&args.SkipPathSeconds, "skip-path-seconds", 0, "Do not draw path for the first X seconds of the track.")
 	pathWidth := flag.Float64("path-width", 10, "Width of the drawn path.")
 	flag.StringVar(&pathColorStr, "path-color", "#FF0000", "Color of the drawn path (hex).")
 	flag.StringVar(&borderColorStr, "border-color", "#A14F00", "Color of the map border (hex).")
