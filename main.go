@@ -488,7 +488,7 @@ func main() {
 	}
 
 	// --- Prefetch Tiles ---
-	prefetchTiles(track.Points, args)
+	prefetchTiles(track, args)
 
 	// --- Concurrency Setup ---
 	var wg sync.WaitGroup
@@ -561,20 +561,22 @@ func main() {
 	fmt.Printf("\nVideo saved to %s\n", args.OutputFile)
 }
 
-func prefetchTiles(points []Point, args *Arguments) {
+func prefetchTiles(track *Track, args *Arguments) {
 	log.Println("Prefetching map tiles...")
 	tileCoords := make(map[Tile]struct{})
-	widgetRadiusPx := float64(args.WidgetSize) / 2.0
 
-	for _, p := range points {
+	for _, p := range track.SmoothedPoints {
+		widgetRadiusPx := float64(args.WidgetSize) / 2.0
+		effectiveWidgetRadiusPx := widgetRadiusPx * p.MapScale
+
 		worldPx, worldPy := deg2num(p.Lat, p.Lon, args.MapZoom)
 		worldPx *= float64(args.TileSize)
 		worldPy *= float64(args.TileSize)
 
-		px_min := worldPx - widgetRadiusPx
-		py_min := worldPy - widgetRadiusPx
-		px_max := worldPx + widgetRadiusPx
-		py_max := worldPy + widgetRadiusPx
+		px_min := worldPx - effectiveWidgetRadiusPx
+		py_min := worldPy - effectiveWidgetRadiusPx
+		px_max := worldPx + effectiveWidgetRadiusPx
+		py_max := worldPy + effectiveWidgetRadiusPx
 
 		tx_min := math.Floor(px_min / float64(args.TileSize))
 		ty_min := math.Floor(py_min / float64(args.TileSize))
@@ -701,14 +703,15 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 
 	// --- Map Rendering ---
 	widgetRadiusPx := float64(args.WidgetSize) / 2.0
+	effectiveWidgetRadiusPx := widgetRadiusPx * mapScale
 	worldPx, worldPy := deg2num(currentPoint.Lat, currentPoint.Lon, args.MapZoom)
 	worldPx *= float64(args.TileSize)
 	worldPy *= float64(args.TileSize)
 
-	px_min := worldPx - widgetRadiusPx
-	py_min := worldPy - widgetRadiusPx
-	px_max := worldPx + widgetRadiusPx
-	py_max := worldPy + widgetRadiusPx
+	px_min := worldPx - effectiveWidgetRadiusPx
+	py_min := worldPy - effectiveWidgetRadiusPx
+	px_max := worldPx + effectiveWidgetRadiusPx
+	py_max := worldPy + effectiveWidgetRadiusPx
 
 	tx_min := math.Floor(px_min / float64(args.TileSize))
 	ty_min := math.Floor(py_min / float64(args.TileSize))
