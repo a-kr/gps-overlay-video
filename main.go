@@ -384,7 +384,10 @@ func applyTrackAdjustments(points []Point, specs []TrackAdjustmentSpec) ([]float
 				if progress < 0 {
 					progress = 0
 				} // Clamp progress
-				interpolatedScale := prevScale + progress*(change.TargetScale-prevScale)
+				logPrevScale := math.Log2(prevScale)
+				logTargetScale := math.Log2(change.TargetScale)
+				interpolatedLogScale := logPrevScale + progress*(logTargetScale-logPrevScale)
+				interpolatedScale := math.Pow(2, interpolatedLogScale)
 				scaleMultipliers[j] = interpolatedScale
 			} else {
 				scaleMultipliers[j] = change.TargetScale
