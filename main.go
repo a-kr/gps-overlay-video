@@ -23,18 +23,16 @@ import (
 	"github.com/golang/freetype/truetype"
 	"github.com/schollz/progressbar/v3"
 	"github.com/tkrajina/gpxgo/gpx"
-	_ "golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/goregular"
 )
 
 const (
 	tileCacheDir           = "tiles"
-	tileSize               = 256
+	tileFetchConcurrency   = 8
 	slopeMaxEleChange      = 3.0
 	avgSpeedWindow         = 15 * time.Second
 	dynMapScaleMinSpeedKmh = 17.0
 	dynMapScaleMaxSpeedKmh = 26.0
-	
 )
 
 // --- Structs ---
@@ -111,6 +109,11 @@ var mapStyles = map[string]MapStyle{
 	"outdoor":       {Name: "outdoor", URL: "https://api.maptiler.com/maps/outdoor-v2/256/{z}/{x}/{y}.png?key=jsK0th32A1xWq2x6QeVu"},
 }
 
+var (
+	tileCache       sync.Map // Concurrent map for caching original tiles
+	scaledTileCache = make(map[string]map[Tile]image.Image)
+)
+
 // --- Argument Parsing ---
 
 func parseArguments() *Arguments {
@@ -162,7 +165,7 @@ func parseHexColor(s string) (color.Color, error) {
 	if err != nil {
 		return color.Black, err
 	}
-	return color.RGBA{r, g, b, 255}, nil
+	return color.RGBA{R: r, G: g, B: b, A: 255}, nil
 }
 
 // --- GPX Parsing & Processing ---
@@ -249,17 +252,6 @@ func parseTrackAdjustmentFile(filePath string) ([]TrackAdjustmentSpec, error) {
 				scale, err := strconv.ParseFloat(scaleStr, 64)
 				if err != nil {
 					return nil, fmt.Errorf("invalid scale value on line %d: %s", i+1, line)
-				}
-				validScales := []float64{1, 2, 4, 8, 16, 32}
-				isValid := false
-				for _, vs := range validScales {
-					if scale == vs {
-						isValid = true
-						break
-					}
-				}
-				if !isValid {
-					return nil, fmt.Errorf("invalid scale value on line %d: %f. Must be one of 1, 2, 4, 8, 16, 32", i+1, scale)
 				}
 				spec.Scale = scale
 				scaleFound = true
@@ -389,7 +381,9 @@ func applyTrackAdjustments(points []Point, specs []TrackAdjustmentSpec) ([]float
 
 			if timeSinceTransitionStart < transitionDuration {
 				progress := float64(timeSinceTransitionStart) / float64(transitionDuration)
-				if progress < 0 { progress = 0 } // Clamp progress
+				if progress < 0 {
+					progress = 0
+				} // Clamp progress
 				interpolatedScale := prevScale + progress*(change.TargetScale-prevScale)
 				scaleMultipliers[j] = interpolatedScale
 			} else {
@@ -400,7 +394,6 @@ func applyTrackAdjustments(points []Point, specs []TrackAdjustmentSpec) ([]float
 
 	return scaleMultipliers, nil
 }
-
 
 func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 	if len(points) < 2 {
@@ -512,7 +505,7 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		// Find the start point for our -25m slope calculation window
 		p_start_idx := -1
 		for j := i; j >= 0; j-- {
-			if math.Abs(smoothed[i].Distance - smoothed[j].Distance) * 1000 >= 25 {
+			if math.Abs(smoothed[i].Distance-smoothed[j].Distance)*1000 >= 25 {
 				p_start_idx = j
 				break
 			}
@@ -521,7 +514,7 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		// Find the end point for our +25m slope calculation window
 		p_end_idx := -1
 		for j := i; j < len(smoothed); j++ {
-			if math.Abs(smoothed[j].Distance - smoothed[i].Distance) * 1000 >= 25 {
+			if math.Abs(smoothed[j].Distance-smoothed[i].Distance)*1000 >= 25 {
 				p_end_idx = j
 				break
 			}
@@ -597,23 +590,7 @@ func deg2num(lat, lon float64, zoom int) (float64, float64) {
 	return xtile, ytile
 }
 
-func getAdjustedMapZoom(originalMapZoom int, mapScale float64) int {
-	if mapScale < 1.0 {
-		return originalMapZoom // Should not happen with current logic, but for safety
-	}
-
-	zoomOutLevels := int(math.Floor(math.Log2(mapScale)))
-	adjustedZoom := originalMapZoom - zoomOutLevels
-
-	if adjustedZoom < 0 {
-		return 0 // Prevent zoom level from going below 0
-	}
-	return adjustedZoom
-}
-
 // --- Tile Downloading & Caching ---
-
-var tileCache sync.Map // Concurrent map for caching tiles
 
 func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, error) {
 	styleInfo, ok := mapStyles[style]
@@ -653,7 +630,7 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 	url = strings.Replace(url, "{x}", strconv.Itoa(x), 1)
 	url = strings.Replace(url, "{y}", strconv.Itoa(y), 1)
 	if args.Is2x {
-		if strings.Contains("outdoor-v2", url) {
+		if strings.Contains(url, "outdoor-v2/256") {
 			url = strings.Replace(url, "outdoor-v2/256", "outdoor-v2", 1)
 		} else {
 			url = strings.Replace(url, ".png", "@2x.png", 1)
@@ -695,140 +672,18 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 	}
 	defer out.Close()
 
-	png.Encode(out, img)
+	// Re-encode to PNG to save
+	buf := new(bytes.Buffer)
+	if err := png.Encode(buf, img); err != nil {
+		return nil, err
+	}
+	out.Write(buf.Bytes())
 
 	tileCache.Store(tilePath, img)
 	return img, nil
 }
 
-// --- Main Logic ---
-
-func main() {
-	args := parseArguments()
-
-	points, err := parseGpx(args.GpxFile)
-	if err != nil {
-		log.Fatalf("Error parsing GPX: %v", err)
-	}
-	if len(points) < 2 {
-		log.Fatal("Not enough points in GPX file.")
-	}
-
-	track := &Track{Points: points}
-	track.SmoothedPoints = preprocessGpxPoints(track.Points, args)
-	for i := 1; i < len(track.Points); i++ {
-		track.TotalDistance += haversine(track.Points[i-1], track.Points[i])
-	}
-
-	if args.Debug {
-		for i := 1; i < len(track.SmoothedPoints); i++ {
-			p := track.SmoothedPoints[i]
-			
-			fmt.Printf("Point %d: Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%, TileZoom: %d, ResidualMapScale: %.2f\n", i, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope, p.TileZoom, p.ResidualMapScale)
-		}
-		return
-	}
-
-	font, err := truetype.Parse(goregular.TTF)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if args.RenderFirstFrame {
-		log.Println("Rendering first frame only...")
-		img := renderFrame(200, 1, track, args, font)
-		gg.SavePNG("first_frame.png", img)
-		log.Println("Saved first_frame.png")
-		return
-	}
-
-	// --- FFMPEG Setup ---
-	ffmpegCmd := exec.Command("ffmpeg", "-y", "-f", "image2pipe", "-vcodec", "png", "-r", fmt.Sprintf("%f", args.Framerate), "-i", "-", "-c:v", "libx264", "-b:v", args.Bitrate, "-pix_fmt", "yuva420p", "-r", fmt.Sprintf("%f", args.Framerate), args.OutputFile)
-	ffmpegIn, err := ffmpegCmd.StdinPipe()
-	if err != nil {
-		log.Fatalf("Failed to get ffmpeg stdin pipe: %v", err)
-	}
-	ffmpegCmd.Stderr = os.Stderr
-	if err := ffmpegCmd.Start(); err != nil {
-		log.Fatalf("Failed to start ffmpeg: %v", err)
-	}
-
-	// --- Prefetch Tiles ---
-	prefetchTiles(track, args)
-
-	// --- Concurrency Setup ---
-	var wg sync.WaitGroup
-	frameChan := make(chan Frame, int(args.Framerate)*2)
-	totalDuration := track.Points[len(track.Points)-1].Timestamp.Sub(track.Points[0].Timestamp)
-	totalFrames := int(totalDuration.Seconds() * args.Framerate)
-
-	// --- Encoder Goroutine (with reordering and timeout) ---
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer ffmpegIn.Close()
-
-		bar := progressbar.Default(int64(totalFrames), "Encoding")
-		frameBuffer := make(map[int][]byte)
-		nextFrameToWrite := 0
-		const frameWaitTimeout = 60 * time.Second
-		timeout := time.NewTimer(frameWaitTimeout)
-
-		for nextFrameToWrite < totalFrames {
-			select {
-			case frame, ok := <-frameChan:
-				if !ok {
-					// This shouldn't happen if generateFrames waits correctly, but handle it.
-					log.Printf("Frame channel closed prematurely. Last written frame: %d", nextFrameToWrite-1)
-					return
-				}
-
-				frameBuffer[frame.Number] = frame.Data
-				if !timeout.Stop() {
-					<-timeout.C
-				}
-				timeout.Reset(frameWaitTimeout)
-
-				// Write all contiguous frames that are ready
-				for {
-					data, found := frameBuffer[nextFrameToWrite]
-					if !found {
-						break // Don't have the next frame yet, wait for it.
-					}
-
-					_, err := ffmpegIn.Write(data)
-					if err != nil {
-						log.Printf("Error writing frame %d to ffmpeg: %v", nextFrameToWrite, err)
-						// Depending on desired robustness, we might want to abort here.
-					}
-					bar.Add(1)
-
-					// Clean up buffer and advance
-					delete(frameBuffer, nextFrameToWrite)
-					nextFrameToWrite++
-				}
-
-			case <-timeout.C:
-				log.Fatalf("Timeout: Stuck waiting for frame %d for over %v. A worker may have hung.", nextFrameToWrite, frameWaitTimeout)
-				return // Exit goroutine
-			}
-		}
-	}()
-
-	// --- Frame Generation ---
-	generateFrames(frameChan, track, args, totalFrames, font)
-	close(frameChan)
-
-	wg.Wait()
-	if err := ffmpegCmd.Wait(); err != nil {
-		log.Fatalf("ffmpeg command failed: %v", err)
-	}
-
-	fmt.Printf("\nVideo saved to %s\n", args.OutputFile)
-}
-
-func prefetchTiles(track *Track, args *Arguments) {
-	log.Println("Prefetching map tiles...")
+func getAllTilesForTrack(track *Track, args *Arguments) map[Tile]struct{} {
 	tileCoords := make(map[Tile]struct{})
 
 	for _, p := range track.SmoothedPoints {
@@ -858,12 +713,16 @@ func prefetchTiles(track *Track, args *Arguments) {
 			}
 		}
 	}
+	return tileCoords
+}
 
-	bar := progressbar.Default(int64(len(tileCoords)), "Downloading Tiles")
+func prefetchTiles(allTiles map[Tile]struct{}, args *Arguments) {
+	log.Println("Prefetching map tiles...")
+	bar := progressbar.Default(int64(len(allTiles)), "Downloading Tiles")
 	var wg sync.WaitGroup
-	limit := make(chan struct{}, 8)
+	limit := make(chan struct{}, tileFetchConcurrency)
 
-	for tile := range tileCoords {
+	for tile := range allTiles {
 		wg.Add(1)
 		limit <- struct{}{}
 		go func(t Tile) {
@@ -876,11 +735,196 @@ func prefetchTiles(track *Track, args *Arguments) {
 	wg.Wait()
 }
 
+func cacheScaledTiles(uniqueScales map[float64]struct{}, allTiles map[Tile]struct{}, args *Arguments) {
+	if len(uniqueScales) == 0 {
+		return
+	}
+	log.Println("Pre-scaling tiles for specified adjustments...")
+
+	for scale := range uniqueScales {
+		zoomOutLevels := 0.0
+		if scale > 1.0 {
+			zoomOutLevels = math.Floor(math.Log2(scale))
+		}
+		residualMapScale := scale / math.Pow(2, zoomOutLevels)
+		scaleKey := fmt.Sprintf("%.4f", residualMapScale)
+
+		if _, exists := scaledTileCache[scaleKey]; exists {
+			continue
+		}
+
+		scalingFactor := 1.0 / residualMapScale
+		if math.Abs(scalingFactor-1.0) < 0.01 {
+			continue
+		}
+
+		log.Printf("Pre-scaling tiles for residual scale %.4f (%.2fx)...", residualMapScale, scalingFactor)
+		scaledTileCache[scaleKey] = make(map[Tile]image.Image)
+		bar := progressbar.Default(int64(len(allTiles)))
+
+		for tile := range allTiles {
+			bar.Add(1)
+			originalImg, err := getTileImage(args.MapStyle, tile.Z, tile.X, tile.Y, args)
+			if err != nil {
+				log.Printf("could not get tile for scaling %v", err)
+				continue
+			}
+
+			scaledWidth := int(float64(originalImg.Bounds().Dx()) * scalingFactor)
+			scaledHeight := int(float64(originalImg.Bounds().Dy()) * scalingFactor)
+
+			if scaledWidth == 0 || scaledHeight == 0 {
+				continue
+			}
+
+			dc := gg.NewContext(scaledWidth, scaledHeight)
+			dc.Scale(scalingFactor, scalingFactor)
+			dc.DrawImage(originalImg, 0, 0)
+			scaledImg := dc.Image()
+
+			scaledTileCache[scaleKey][tile] = scaledImg
+		}
+	}
+}
+
+// --- Main Logic ---
+
+func main() {
+	args := parseArguments()
+
+	points, err := parseGpx(args.GpxFile)
+	if err != nil {
+		log.Fatalf("Error parsing GPX: %v", err)
+	}
+	if len(points) < 2 {
+		log.Fatal("Not enough points in GPX file.")
+	}
+
+	track := &Track{Points: points}
+	track.SmoothedPoints = preprocessGpxPoints(track.Points, args)
+	for i := 1; i < len(track.Points); i++ {
+		track.TotalDistance += haversine(track.Points[i-1], track.Points[i])
+	}
+
+	if args.Debug {
+		for i := 1; i < len(track.SmoothedPoints); i++ {
+			p := track.SmoothedPoints[i]
+			fmt.Printf("Point %d: Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%, TileZoom: %d, ResidualMapScale: %.2f\n", i, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope, p.TileZoom, p.ResidualMapScale)
+		}
+		return
+	}
+
+	font, err := truetype.Parse(goregular.TTF)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// --- Prefetch & Cache Tiles ---
+	allTilesForTrack := getAllTilesForTrack(track, args)
+	prefetchTiles(allTilesForTrack, args)
+
+	adjSpecs, err := parseTrackAdjustmentFile(args.TrackAdjustmentFile)
+	if err != nil {
+		log.Fatalf("Error parsing track adjustment file: %v", err)
+	}
+	if adjSpecs != nil {
+		uniqueScales := make(map[float64]struct{})
+		for _, spec := range adjSpecs {
+			uniqueScales[spec.Scale] = struct{}{}
+		}
+		cacheScaledTiles(uniqueScales, allTilesForTrack, args)
+	}
+
+	if args.RenderFirstFrame {
+		log.Println("Rendering first frame only...")
+		img := renderFrame(200, 1, track, args, font)
+		gg.SavePNG("first_frame.png", img)
+		log.Println("Saved first_frame.png")
+		return
+	}
+
+	// --- FFMPEG Setup ---
+	ffmpegCmd := exec.Command("ffmpeg", "-y", "-f", "image2pipe", "-vcodec", "png", "-r", fmt.Sprintf("%f", args.Framerate), "-i", "-", "-c:v", "libx264", "-b:v", args.Bitrate, "-pix_fmt", "yuva420p", "-r", fmt.Sprintf("%f", args.Framerate), args.OutputFile)
+	ffmpegIn, err := ffmpegCmd.StdinPipe()
+	if err != nil {
+		log.Fatalf("Failed to get ffmpeg stdin pipe: %v", err)
+	}
+	ffmpegCmd.Stderr = os.Stderr
+	if err := ffmpegCmd.Start(); err != nil {
+		log.Fatalf("Failed to start ffmpeg: %v", err)
+	}
+
+	// --- Concurrency Setup ---
+	var wg sync.WaitGroup
+	frameChan := make(chan Frame, int(args.Framerate)*2)
+	totalDuration := track.Points[len(track.Points)-1].Timestamp.Sub(track.Points[0].Timestamp)
+	totalFrames := int(totalDuration.Seconds() * args.Framerate)
+
+	// --- Encoder Goroutine (with reordering and timeout) ---
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer ffmpegIn.Close()
+
+		bar := progressbar.Default(int64(totalFrames), "Encoding")
+		frameBuffer := make(map[int][]byte)
+		nextFrameToWrite := 0
+		const frameWaitTimeout = 60 * time.Second
+		timeout := time.NewTimer(frameWaitTimeout)
+
+		for nextFrameToWrite < totalFrames {
+			select {
+			case frame, ok := <-frameChan:
+				if !ok {
+					log.Printf("Frame channel closed prematurely. Last written frame: %d", nextFrameToWrite-1)
+					return
+				}
+
+				frameBuffer[frame.Number] = frame.Data
+				if !timeout.Stop() {
+					<-timeout.C
+				}
+				timeout.Reset(frameWaitTimeout)
+
+				for {
+					data, found := frameBuffer[nextFrameToWrite]
+					if !found {
+						break
+					}
+
+					_, err := ffmpegIn.Write(data)
+					if err != nil {
+						log.Printf("Error writing frame %d to ffmpeg: %v", nextFrameToWrite, err)
+					}
+					bar.Add(1)
+
+					delete(frameBuffer, nextFrameToWrite)
+					nextFrameToWrite++
+				}
+
+			case <-timeout.C:
+				log.Fatalf("Timeout: Stuck waiting for frame %d for over %v. A worker may have hung.", nextFrameToWrite, frameWaitTimeout)
+				return
+			}
+		}
+	}()
+
+	// --- Frame Generation ---
+	generateFrames(frameChan, track, args, totalFrames, font)
+	close(frameChan)
+
+	wg.Wait()
+	if err := ffmpegCmd.Wait(); err != nil {
+		log.Fatalf("ffmpeg command failed: %v", err)
+	}
+
+	fmt.Printf("\nVideo saved to %s\n", args.OutputFile)
+}
+
 func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, totalFrames int, font *truetype.Font) {
 	var wg sync.WaitGroup
-	tasks := make(chan int, args.Workers*2) // Bounded channel to apply backpressure
+	tasks := make(chan int, args.Workers*2)
 
-	// Start a producer goroutine to feed the tasks channel
 	go func() {
 		for i := 0; i < totalFrames; i++ {
 			tasks <- i
@@ -888,7 +932,6 @@ func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, total
 		close(tasks)
 	}()
 
-	// Start worker goroutines
 	for i := 0; i < args.Workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -920,13 +963,11 @@ func drawSpeedIcon(dc *gg.Context, x, y, size, lineWidth float64) {
 	dc.Translate(x, y)
 	dc.SetLineWidth(lineWidth)
 
-	// Draw a semicircle from 165 to 375 degrees
 	startAngle := gg.Radians(165)
 	endAngle := gg.Radians(375)
 	dc.DrawArc(0, 0, size/2, startAngle, endAngle)
 	dc.Stroke()
 
-	// Draw the needle
 	needleAngle := gg.Radians(210) // Example angle
 	dc.MoveTo(0, 0)
 	dc.LineTo(math.Cos(needleAngle)*size/2.2, math.Sin(needleAngle)*size/2.2)
@@ -938,7 +979,6 @@ func drawSlopeIcon(dc *gg.Context, x, y, size, lineWidth float64) {
 	dc.Push()
 	dc.Translate(x, y)
 	dc.SetLineWidth(lineWidth)
-	// Draw a 30-degree slope triangle
 	angle := gg.Radians(30)
 	legX := size
 	legY := size * math.Tan(angle)
@@ -967,60 +1007,126 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	slope := slopeDisplayPoint.SmoothedSlope
 	currentDistance := currentPoint.Distance
 
-	// --- Dynamic Map Scale Calculation ---
+	// --- Map Rendering Setup ---
 	adjustedMapZoom := currentPoint.TileZoom
 	residualMapScale := currentPoint.ResidualMapScale
-
-	// --- Map Rendering ---
 	widgetRadiusPx := float64(args.WidgetSize) / 2.0
-	effectiveWidgetRadiusPx := widgetRadiusPx * residualMapScale
+
+	var targetCachedResidualScale float64 = -1.0
+	var scaleKey string
+	for keyStr := range scaledTileCache {
+		keyFloat, _ := strconv.ParseFloat(keyStr, 64)
+		if math.Abs(residualMapScale-keyFloat) < 0.01 {
+			targetCachedResidualScale = keyFloat
+			scaleKey = keyStr
+			break
+		}
+	}
+
+	// --- Render Map Image ---
+	var mapDC *gg.Context
+	var centerPxOnMap, centerPyOnMap float64
+
 	worldPx, worldPy := deg2num(currentPoint.Lat, currentPoint.Lon, adjustedMapZoom)
 	worldPx *= float64(args.TileSize)
 	worldPy *= float64(args.TileSize)
 
-	px_min := worldPx - effectiveWidgetRadiusPx
-	py_min := worldPy - effectiveWidgetRadiusPx
-	px_max := worldPx + effectiveWidgetRadiusPx
-	py_max := worldPy + effectiveWidgetRadiusPx
+	if targetCachedResidualScale > 0 {
+		// --- Cached Render Path ---
+		scalingFactor := 1.0 / targetCachedResidualScale
+		scaledTileSize := int(float64(args.TileSize) * scalingFactor)
+		effectiveWidgetRadiusPx := widgetRadiusPx / scalingFactor
 
-	tx_min := math.Floor(px_min / float64(args.TileSize))
-	ty_min := math.Floor(py_min / float64(args.TileSize))
-	tx_max := math.Floor(px_max / float64(args.TileSize))
-	ty_max := math.Floor(py_max / float64(args.TileSize))
+		px_min := worldPx - effectiveWidgetRadiusPx
+		py_min := worldPy - effectiveWidgetRadiusPx
+		px_max := worldPx + effectiveWidgetRadiusPx
+		py_max := worldPy + effectiveWidgetRadiusPx
 
-	mapWidth := (int(tx_max) - int(tx_min) + 1) * args.TileSize
-	mapHeight := (int(ty_max) - int(ty_min) + 1) * args.TileSize
-	mapImage := image.NewRGBA(image.Rect(0, 0, mapWidth, mapHeight))
-	mapDC := gg.NewContextForRGBA(mapImage)
+		tx_min := math.Floor(px_min / float64(args.TileSize))
+		ty_min := math.Floor(py_min / float64(args.TileSize))
+		tx_max := math.Floor(px_max / float64(args.TileSize))
+		ty_max := math.Floor(py_max / float64(args.TileSize))
 
-	for x := int(tx_min); x <= int(tx_max); x++ {
-		for y := int(ty_min); y <= int(ty_max); y++ {
+		mapWidth := (int(tx_max)-int(tx_min)+1) * scaledTileSize
+		mapHeight := (int(ty_max)-int(ty_min)+1) * scaledTileSize
+		mapImage := image.NewRGBA(image.Rect(0, 0, mapWidth, mapHeight))
+		mapDC = gg.NewContextForRGBA(mapImage)
+
+		for x := int(tx_min); x <= int(tx_max); x++ {
+			for y := int(ty_min); y <= int(ty_max); y++ {
+				tile := Tile{X: x, Y: y, Z: adjustedMapZoom}
+				if scaledImg, ok := scaledTileCache[scaleKey][tile]; ok {
+					mapDC.DrawImage(scaledImg, (x-int(tx_min))*scaledTileSize, (y-int(ty_min))*scaledTileSize)
+				}
+			}
+		}
+
+		centerPxOnMap = (worldPx - (tx_min * float64(args.TileSize))) * scalingFactor
+		centerPyOnMap = (worldPy - (ty_min * float64(args.TileSize))) * scalingFactor
+
+		// Path
+		if len(pathSoFar) > 1 {
+			mapDC.SetColor(args.PathColor)
+			mapDC.SetLineWidth(args.PathWidth)
+			for i := 1; i < len(pathSoFar); i++ {
+				p1x, p1y := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, adjustedMapZoom)
+				p2x, p2y := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, adjustedMapZoom)
+				sp1x := (p1x*float64(args.TileSize) - tx_min*float64(args.TileSize)) * scalingFactor
+				sp1y := (p1y*float64(args.TileSize) - ty_min*float64(args.TileSize)) * scalingFactor
+				sp2x := (p2x*float64(args.TileSize) - tx_min*float64(args.TileSize)) * scalingFactor
+				sp2y := (p2y*float64(args.TileSize) - ty_min*float64(args.TileSize)) * scalingFactor
+				mapDC.DrawLine(sp1x, sp1y, sp2x, sp2y)
+				mapDC.Stroke()
+			}
+		}
+	} else {
+		// --- Dynamic Scale Render Path ---
+		effectiveWidgetRadiusPx := widgetRadiusPx * residualMapScale
+
+		px_min := worldPx - effectiveWidgetRadiusPx
+		py_min := worldPy - effectiveWidgetRadiusPx
+		px_max := worldPx + effectiveWidgetRadiusPx
+		py_max := worldPy + effectiveWidgetRadiusPx
+
+		tx_min := math.Floor(px_min / float64(args.TileSize))
+		ty_min := math.Floor(py_min / float64(args.TileSize))
+		tx_max := math.Floor(px_max / float64(args.TileSize))
+		ty_max := math.Floor(py_max / float64(args.TileSize))
+
+		mapWidth := (int(tx_max) - int(tx_min) + 1) * args.TileSize
+		mapHeight := (int(ty_max) - int(ty_min) + 1) * args.TileSize
+		mapImage := image.NewRGBA(image.Rect(0, 0, mapWidth, mapHeight))
+		mapDC = gg.NewContextForRGBA(mapImage)
+
+		for x := int(tx_min); x <= int(tx_max); x++ {
+			for y := int(ty_min); y <= int(ty_max); y++ {
 				tileImg, err := getTileImage(args.MapStyle, adjustedMapZoom, x, y, args)
-			if err != nil {
-				log.Printf("could not get tile image: %v", err)
+				if err != nil {
+					log.Printf("could not get tile image: %v", err)
+				}
+				if tileImg != nil {
+					mapDC.DrawImage(tileImg, (x-int(tx_min))*args.TileSize, (y-int(ty_min))*args.TileSize)
+				}
 			}
-			if tileImg != nil {
-				mapDC.DrawImage(tileImg, (x-int(tx_min))*args.TileSize, (y-int(ty_min))*args.TileSize)
+		}
+
+		centerPxOnMap = worldPx - (tx_min * float64(args.TileSize))
+		centerPyOnMap = worldPy - (ty_min * float64(args.TileSize))
+
+		// Path
+		if len(pathSoFar) > 1 {
+			mapDC.SetColor(args.PathColor)
+			mapDC.SetLineWidth(args.PathWidth)
+			for i := 1; i < len(pathSoFar); i++ {
+				p1x, p1y := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, adjustedMapZoom)
+				p2x, p2y := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, adjustedMapZoom)
+				mapDC.DrawLine((p1x-tx_min)*float64(args.TileSize), (p1y-ty_min)*float64(args.TileSize), (p2x-tx_min)*float64(args.TileSize), (p2y-ty_min)*float64(args.TileSize))
+				mapDC.Stroke()
 			}
 		}
 	}
 
-	centerPxOnMap := worldPx - (tx_min * float64(args.TileSize))
-	centerPyOnMap := worldPy - (ty_min * float64(args.TileSize))
-
-	// Path
-	if len(pathSoFar) > 1 {
-		mapDC.SetColor(args.PathColor)
-		mapDC.SetLineWidth(args.PathWidth)
-		for i := 1; i < len(pathSoFar); i++ {
-			p1x, p1y := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, adjustedMapZoom)
-			p2x, p2y := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, adjustedMapZoom)
-			mapDC.DrawLine((p1x-tx_min)*float64(args.TileSize), (p1y-ty_min)*float64(args.TileSize), (p2x-tx_min)*float64(args.TileSize), (p2y-ty_min)*float64(args.TileSize))
-			mapDC.Stroke()
-		}
-	}
-
-	// Current position marker
+	// --- Draw Marker & Compose ---
 	mapDC.SetColor(color.RGBA{0, 0, 255, 255})
 	mapDC.DrawPoint(centerPxOnMap, centerPyOnMap, 8)
 	mapDC.Fill()
@@ -1034,10 +1140,10 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	mask.DrawCircle(widgetRadiusPx, widgetRadiusPx, widgetRadiusPx)
 	mask.Clip()
 
-	// Apply dynamic scaling
-	if currentPoint.MapScale != 1.0 {
+	if targetCachedResidualScale <= 0 && currentPoint.MapScale != 1.0 {
+		// Apply dynamic scaling only if not using a cached version
 		mask.Translate(widgetRadiusPx, widgetRadiusPx)
-		if math.Abs(residualMapScale - 1.0) > 0.01 {
+		if math.Abs(residualMapScale-1.0) > 0.01 {
 			mask.Scale(1/residualMapScale, 1/residualMapScale)
 		}
 		mask.Translate(-widgetRadiusPx, -widgetRadiusPx)
@@ -1053,24 +1159,19 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 
 	// 3D Border
 	borderWidth := float64(args.WidgetSize) * 0.04
-	// Shadow (bottom-right)
 	frameDC.SetColor(color.RGBA{R: 0, G: 0, B: 0, A: 80})
 	frameDC.SetLineWidth(borderWidth * 0.75)
 	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/2, mapPosY+widgetRadiusPx+borderWidth/2, widgetRadiusPx, gg.Radians(-45), gg.Radians(135))
 	frameDC.Stroke()
-	// Highlight (top-left)
 	frameDC.SetColor(color.RGBA{R: 255, G: 255, B: 255, A: 80})
 	frameDC.DrawArc(mapPosX+widgetRadiusPx+borderWidth/2, mapPosY+widgetRadiusPx+borderWidth/2, widgetRadiusPx, gg.Radians(135), gg.Radians(315))
 	frameDC.Stroke()
-	// Main Border
 	frameDC.SetColor(args.BorderColor)
 	frameDC.SetLineWidth(borderWidth)
 	frameDC.DrawCircle(mapPosX+widgetRadiusPx, mapPosY+widgetRadiusPx, widgetRadiusPx)
 	frameDC.Stroke()
 
 	// --- Indicators ---
-
-	// Proportional sizing
 	widgetWidth := float64(args.WidgetSize)
 	valueFontSize := widgetWidth / 8.0
 	unitFontSize := valueFontSize / 2.0
@@ -1084,75 +1185,56 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 
 	frameDC.SetColor(args.IndicatorColor)
 
-	// --- Speed Indicator (Left Third) ---
+	// Speed Indicator
 	speedBlockX := mapPosX
 	speedBlockWidth := widgetWidth / 3.0
-
 	speedIconX := speedBlockX + iconSize/2
 	speedIconY := row1Y - 1.15*valueFontSize
 	drawSpeedIcon(frameDC, speedIconX, speedIconY, iconSize, iconLineWidth)
-
 	speedValueText := fmt.Sprintf("%.0f", math.Round(speed))
 	speedUnitText := " km/h"
-
 	frameDC.SetFontFace(valueFace)
 	valueWidth, _ := frameDC.MeasureString(speedValueText)
 	frameDC.SetFontFace(unitFace)
 	unitWidth, _ := frameDC.MeasureString(speedUnitText)
-
-	totalTextWidth := valueWidth + unitWidth
-	//startX := speedBlockX + speedBlockWidth - totalTextWidth
-	startX := speedBlockX + speedBlockWidth - speedBlockWidth
-
+	startX := speedBlockX + speedBlockWidth - (valueWidth + unitWidth)
 	frameDC.SetFontFace(valueFace)
 	frameDC.DrawString(speedValueText, startX, row1Y)
 	frameDC.SetFontFace(unitFace)
 	frameDC.DrawString(speedUnitText, startX+valueWidth, row1Y)
 
-	// --- Slope Indicator (Right Third) ---
+	// Slope Indicator
 	slopeBlockX := mapPosX + widgetWidth*2/3
 	slopeBlockWidth := widgetWidth / 3.0
-
-	slopeIconX := slopeBlockX + 2*iconSize
-	slopeIconY := row1Y - 1.25*valueFontSize
+	slopeIconX := slopeBlockX + iconSize/2
+	slopeIconY := row1Y - 1.15*valueFontSize
 	drawSlopeIcon(frameDC, slopeIconX, slopeIconY, iconSize, iconLineWidth)
-
 	slopeValueText := fmt.Sprintf("%.1f", slope)
 	slopeUnitText := " %"
-
 	frameDC.SetFontFace(valueFace)
 	valueWidth, _ = frameDC.MeasureString(slopeValueText)
 	frameDC.SetFontFace(unitFace)
 	unitWidth, _ = frameDC.MeasureString(slopeUnitText)
-
-	totalTextWidth = valueWidth + unitWidth
-	startX = slopeBlockX + slopeBlockWidth - totalTextWidth
-
+	startX = slopeBlockX + slopeBlockWidth - (valueWidth + unitWidth)
 	frameDC.SetFontFace(valueFace)
 	frameDC.DrawString(slopeValueText, startX, row1Y)
 	frameDC.SetFontFace(unitFace)
 	frameDC.DrawString(slopeUnitText, startX+valueWidth, row1Y)
 
-
-	// --- Row 2: Distance Bar ---
+	// Distance Bar
 	row2Y := row1Y + unitFontSize*1.2
 	barWidth := widgetWidth
 	barHeight := 20.0
 	progress := currentDistance / track.TotalDistance
-
-	// Bar background
 	frameDC.SetColor(color.RGBA{80, 80, 80, 255})
 	frameDC.DrawRectangle(mapPosX, row2Y, barWidth, barHeight)
 	frameDC.Fill()
-	// Bar progress
 	frameDC.SetColor(color.RGBA{100, 180, 255, 255})
 	frameDC.DrawRectangle(mapPosX, row2Y, barWidth*progress, barHeight)
 	frameDC.Fill()
-
-	// Distance text
 	distText := fmt.Sprintf("%.2f / %.2f km", currentDistance, track.TotalDistance)
 	frameDC.SetColor(args.IndicatorColor)
-	frameDC.SetFontFace(unitFace) // Using smaller font for distance text
+	frameDC.SetFontFace(unitFace)
 	frameDC.DrawStringAnchored(distText, mapPosX+barWidth/2, row2Y+barHeight/2, 0.5, 0.5)
 
 	return frameDC.Image()
