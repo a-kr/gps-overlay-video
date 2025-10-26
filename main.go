@@ -217,19 +217,28 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 	for i := 1; i < len(smoothed); i++ {
 		smoothed[i].Distance = smoothed[i-1].Distance + haversine(smoothed[i-1], smoothed[i])
 
-		// Speed calculation (moving average over 5 points)
-		start := i - 4
-		if start < 0 {
-			start = 0
+		// Speed calculation (centered 5 points)
+		windowStart := i - 2
+		if windowStart < 0 {
+			windowStart = 0
 		}
+		windowEnd := i + 2
+		if windowEnd >= len(smoothed) {
+			windowEnd = len(smoothed) - 1
+		}
+
 		var totalDist float64
 		var totalTime float64
-		for j := start; j < i; j++ {
+		for j := windowStart; j < windowEnd; j++ {
 			totalDist += haversine(smoothed[j], smoothed[j+1])
 			totalTime += smoothed[j+1].Timestamp.Sub(smoothed[j].Timestamp).Seconds()
 		}
 		if totalTime > 0 {
 			smoothed[i].Speed = (totalDist * 3600) / totalTime
+		} else if i > 0 {
+			smoothed[i].Speed = smoothed[i-1].Speed
+		} else {
+			smoothed[i].Speed = 0
 		}
 	}
 
@@ -283,17 +292,29 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		}
 	}
 
-	// --- Slope Calculation (over 50m distance) ---
-	slopeStartIndex := 0
-	for i := 1; i < len(smoothed); i++ {
-		// Find the start point for our 50m slope calculation window
-		for slopeStartIndex < i && (smoothed[i].Distance-smoothed[slopeStartIndex].Distance)*1000 > 50 {
-			slopeStartIndex++
+	// --- Slope Calculation (centered 50m distance) ---
+	for i := range smoothed {
+		// Find the start point for our -25m slope calculation window
+		p_start_idx := -1
+		for j := i; j >= 0; j-- {
+			if (smoothed[i].Distance - smoothed[j].Distance) * 1000 >= 25 {
+				p_start_idx = j
+				break
+			}
 		}
 
-		if slopeStartIndex > 0 {
-			p_start := smoothed[slopeStartIndex-1]
-			p_end := smoothed[i]
+		// Find the end point for our +25m slope calculation window
+		p_end_idx := -1
+		for j := i; j < len(smoothed); j++ {
+			if (smoothed[j].Distance - smoothed[i].Distance) * 1000 >= 25 {
+				p_end_idx = j
+				break
+			}
+		}
+
+		if p_start_idx != -1 && p_end_idx != -1 {
+			p_start := smoothed[p_start_idx]
+			p_end := smoothed[p_end_idx]
 
 			distance_delta := (p_end.Distance - p_start.Distance) * 1000 // meters
 			elevation_delta := p_end.Ele - p_start.Ele
@@ -301,10 +322,12 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 			if distance_delta > 1 { // Only calculate if distance is meaningful
 				smoothed[i].Slope = (elevation_delta / distance_delta) * 100
 			} else {
-				smoothed[i].Slope = smoothed[i-1].Slope // Carry over previous slope if not moving
+				smoothed[i].Slope = 0
 			}
+		} else if i > 0 {
+			// If we can't find a full 50m window, carry over previous slope
+			smoothed[i].Slope = smoothed[i-1].Slope
 		} else {
-			// Not enough distance covered yet for a 50m window
 			smoothed[i].Slope = 0
 		}
 	}
