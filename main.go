@@ -31,7 +31,9 @@ const (
 	tileCacheDir           = "tiles"
 	tileSize               = 256
 	slopeMaxEleChange      = 3.0
-	slopeCalculationPoints = 5
+	avgSpeedWindow         = 15 * time.Second
+	dynMapScaleMinSpeedKmh = 17.0
+	dynMapScaleMaxSpeedKmh = 26.0
 )
 
 // --- Structs ---
@@ -61,6 +63,7 @@ type Arguments struct {
 	Is2x             bool
 	TileSize         int
 	DebugSlope       bool
+	DynMapScale      bool
 }
 
 type Frame struct {
@@ -69,7 +72,7 @@ type Frame struct {
 }
 
 type Point struct {
-	Lat, Lon, Ele, Speed, Slope, Distance, SmoothedSlope float64
+	Lat, Lon, Ele, Speed, Slope, Distance, SmoothedSlope, AvgSpeed, MapScale float64
 	Timestamp     time.Time
 }
 
@@ -114,6 +117,7 @@ func parseArguments() *Arguments {
 	flag.BoolVar(&args.RenderFirstFrame, "render-first-frame", false, "Render only the first frame and save as first_frame.png.")
 	flag.BoolVar(&args.Is2x, "2x", true, "Use 2x tiles.")
 	flag.BoolVar(&args.DebugSlope, "debug-slope", false, "Debug slope calculation.")
+	flag.BoolVar(&args.DynMapScale, "dyn-map-scale", false, "Enable dynamic map scaling based on speed.")
 
 	fmt.Println(os.Args)
 	flag.Parse()
@@ -197,7 +201,7 @@ func parseGpx(filePath string) ([]Point, error) {
 	return points, nil
 }
 
-func preprocessGpxPoints(points []Point) []Point {
+func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 	if len(points) < 2 {
 		return points
 	}
@@ -226,6 +230,56 @@ func preprocessGpxPoints(points []Point) []Point {
 		}
 		if totalTime > 0 {
 			smoothed[i].Speed = (totalDist * 3600) / totalTime
+		}
+	}
+
+	// --- Moving Average Speed Calculation (30s window) ---
+	if len(smoothed) > 0 {
+		left, right := 0, 0
+		var speedSum float64
+		var speedCount int
+
+		for i := range smoothed {
+			// Window for point i
+			windowStart := smoothed[i].Timestamp.Add(-avgSpeedWindow)
+			windowEnd := smoothed[i].Timestamp.Add(avgSpeedWindow)
+
+			// Expand window on the right
+			for right < len(smoothed) && !smoothed[right].Timestamp.After(windowEnd) {
+				speedSum += smoothed[right].Speed
+				speedCount++
+				right++
+			}
+
+			// Shrink window on the left
+			for left < len(smoothed) && smoothed[left].Timestamp.Before(windowStart) {
+				speedSum -= smoothed[left].Speed
+				speedCount--
+				left++
+			}
+
+			if speedCount > 0 {
+				smoothed[i].AvgSpeed = speedSum / float64(speedCount)
+			} else if i > 0 {
+				smoothed[i].AvgSpeed = smoothed[i-1].AvgSpeed
+			} else {
+				smoothed[i].AvgSpeed = smoothed[i].Speed
+			}
+		}
+	}
+
+	// --- Dynamic Map Scale Calculation ---
+	for i := range smoothed {
+		smoothed[i].MapScale = 1.0
+		if args.DynMapScale {
+			avgSpeed := smoothed[i].AvgSpeed
+			if avgSpeed > dynMapScaleMinSpeedKmh {
+				factor := (avgSpeed - dynMapScaleMinSpeedKmh) / (dynMapScaleMaxSpeedKmh - dynMapScaleMinSpeedKmh)
+				if factor > 1.0 {
+					factor = 1.0
+				}
+				smoothed[i].MapScale = 1.0 + factor
+			}
 		}
 	}
 
@@ -395,18 +449,19 @@ func main() {
 	}
 
 	track := &Track{Points: points}
-	track.SmoothedPoints = preprocessGpxPoints(track.Points)
+	track.SmoothedPoints = preprocessGpxPoints(track.Points, args)
 	for i := 1; i < len(track.Points); i++ {
 		track.TotalDistance += haversine(track.Points[i-1], track.Points[i])
 	}
 
-    if args.DebugSlope {
-        for i := 1; i < len(track.SmoothedPoints); i++ {
+	if args.DebugSlope {
+		for i := 1; i < len(track.SmoothedPoints); i++ {
 			p := track.SmoothedPoints[i]
-			fmt.Printf("Point %d: Speed: %.2f km/h, Slope: %.2f%%, SmoothedSlope: %.2f%%\n", i, p.Speed, p.Slope, p.SmoothedSlope)
-        }
-        return
-    }
+			
+			fmt.Printf("Point %d: Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%\n", i, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope)
+		}
+		return
+	}
 
 	font, err := truetype.Parse(goregular.TTF)
 	if err != nil {
@@ -641,6 +696,9 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	slope := slopeDisplayPoint.SmoothedSlope
 	currentDistance := currentPoint.Distance
 
+	// --- Dynamic Map Scale Calculation ---
+	mapScale := currentPoint.MapScale
+
 	// --- Map Rendering ---
 	widgetRadiusPx := float64(args.WidgetSize) / 2.0
 	worldPx, worldPy := deg2num(currentPoint.Lat, currentPoint.Lon, args.MapZoom)
@@ -702,8 +760,16 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	mask := gg.NewContext(args.WidgetSize, args.WidgetSize)
 	mask.DrawCircle(widgetRadiusPx, widgetRadiusPx, widgetRadiusPx)
 	mask.Clip()
+
+	// Apply dynamic scaling
+	if args.DynMapScale && mapScale != 1.0 {
+		mask.Translate(widgetRadiusPx, widgetRadiusPx)
+		mask.Scale(1/mapScale, 1/mapScale)
+		mask.Translate(-widgetRadiusPx, -widgetRadiusPx)
+	}
+
 	mask.DrawImage(mapDC.Image(), -int(centerPxOnMap-widgetRadiusPx), -int(centerPyOnMap-widgetRadiusPx))
-	
+
 	// --- Final Frame Composition ---
 	frameDC := gg.NewContext(args.VideoWidth, args.VideoHeight)
 	mapPosX := float64(20)
@@ -735,25 +801,25 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	unitFontSize := valueFontSize / 2.0
 	iconSize := widgetWidth / 9.0
 	iconLineWidth := widgetWidth / 150.0
-	
+
 	valueFace := truetype.NewFace(font, &truetype.Options{Size: valueFontSize})
 	unitFace := truetype.NewFace(font, &truetype.Options{Size: unitFontSize})
 
 	row1Y := mapPosY + widgetWidth + valueFontSize*1.2
-	
+
 	frameDC.SetColor(args.IndicatorColor)
 
 	// --- Speed Indicator (Left Third) ---
 	speedBlockX := mapPosX
 	speedBlockWidth := widgetWidth / 3.0
-	
+
 	speedIconX := speedBlockX + iconSize/2
-	speedIconY := row1Y - 1.15 * valueFontSize
+	speedIconY := row1Y - 1.15*valueFontSize
 	drawSpeedIcon(frameDC, speedIconX, speedIconY, iconSize, iconLineWidth)
 
 	speedValueText := fmt.Sprintf("%.0f", math.Round(speed))
 	speedUnitText := " km/h"
-	
+
 	frameDC.SetFontFace(valueFace)
 	valueWidth, _ := frameDC.MeasureString(speedValueText)
 	frameDC.SetFontFace(unitFace)
@@ -761,20 +827,19 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 
 	totalTextWidth := valueWidth + unitWidth
 	//startX := speedBlockX + speedBlockWidth - totalTextWidth
-	startX := speedBlockX  + speedBlockWidth - speedBlockWidth
+	startX := speedBlockX + speedBlockWidth - speedBlockWidth
 
 	frameDC.SetFontFace(valueFace)
 	frameDC.DrawString(speedValueText, startX, row1Y)
 	frameDC.SetFontFace(unitFace)
-	frameDC.DrawString(speedUnitText, startX + valueWidth, row1Y)
-
+	frameDC.DrawString(speedUnitText, startX+valueWidth, row1Y)
 
 	// --- Slope Indicator (Right Third) ---
 	slopeBlockX := mapPosX + widgetWidth*2/3
 	slopeBlockWidth := widgetWidth / 3.0
 
-	slopeIconX := slopeBlockX + 2 * iconSize
-	slopeIconY := row1Y - 1.25 * valueFontSize
+	slopeIconX := slopeBlockX + 2*iconSize
+	slopeIconY := row1Y - 1.25*valueFontSize
 	drawSlopeIcon(frameDC, slopeIconX, slopeIconY, iconSize, iconLineWidth)
 
 	slopeValueText := fmt.Sprintf("%.1f", slope)
@@ -791,7 +856,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	frameDC.SetFontFace(valueFace)
 	frameDC.DrawString(slopeValueText, startX, row1Y)
 	frameDC.SetFontFace(unitFace)
-	frameDC.DrawString(slopeUnitText, startX + valueWidth, row1Y)
+	frameDC.DrawString(slopeUnitText, startX+valueWidth, row1Y)
 
 
 	// --- Row 2: Distance Bar ---
@@ -833,14 +898,16 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 				derivedCalcRatio = 0
 			}
 			return Point{
-				Lat: p1.Lat + (p2.Lat-p1.Lat)*ratio,
-				Lon: p1.Lon + (p2.Lon-p1.Lon)*ratio,
-				Ele: p1.Ele + (p2.Ele-p1.Ele)*ratio,
-				Speed: p1.Speed + (p2.Speed-p1.Speed)*derivedCalcRatio,
-				Slope: p1.Slope + (p2.Slope-p1.Slope)*derivedCalcRatio,
-				SmoothedSlope: p1.SmoothedSlope + (p2.SmoothedSlope - p1.SmoothedSlope)*derivedCalcRatio,
-				Distance: p1.Distance + (p2.Distance-p1.Distance)*derivedCalcRatio,
-				Timestamp: targetTime,
+				Lat:           p1.Lat + (p2.Lat-p1.Lat)*ratio,
+				Lon:           p1.Lon + (p2.Lon-p1.Lon)*ratio,
+				Ele:           p1.Ele + (p2.Ele-p1.Ele)*ratio,
+				Speed:         p1.Speed + (p2.Speed-p1.Speed)*derivedCalcRatio,
+				AvgSpeed:      p1.AvgSpeed + (p2.AvgSpeed-p1.AvgSpeed)*derivedCalcRatio,
+				Slope:         p1.Slope + (p2.Slope-p1.Slope)*derivedCalcRatio,
+				SmoothedSlope: p1.SmoothedSlope + (p2.SmoothedSlope-p1.SmoothedSlope)*derivedCalcRatio,
+				Distance:      p1.Distance + (p2.Distance-p1.Distance)*derivedCalcRatio,
+				MapScale:      p1.MapScale + (p2.MapScale-p1.MapScale)*ratio,
+				Timestamp:     targetTime,
 			}
 		}
 	}
