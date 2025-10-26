@@ -34,9 +34,13 @@ func main() {
 
 	track := &Track{Points: points}
 	track.SmoothedPoints = preprocessGpxPoints(track.Points, args)
+	track.RenderToIndex = len(track.SmoothedPoints)
+
 	for i := 1; i < len(track.Points); i++ {
 		track.TotalDistance += haversine(track.Points[i-1], track.Points[i])
 	}
+
+	cutTrack(track, args.From, args.To)
 
 	if args.Debug {
 		for i := 1; i < len(track.SmoothedPoints); i++ {
@@ -69,7 +73,7 @@ func main() {
 
 	if args.RenderFirstFrame {
 		log.Println("Rendering first frame only...")
-		img := renderFrame(200, 1, track, args, font)
+		img := renderFrame(22000, 1, track, args, font, track.SmoothedPoints[0].Timestamp)
 		gg.SavePNG("first_frame.png", img)
 		log.Println("Saved first_frame.png")
 		return

@@ -23,7 +23,7 @@ type Frame struct {
 
 // --- Video Pipeline ---
 
-func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, totalFrames int, font *truetype.Font) {
+func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, totalFrames int, font *truetype.Font, segmentStartTime time.Time) {
 	var wg sync.WaitGroup
 	tasks := make(chan int, args.Workers*2)
 
@@ -41,7 +41,7 @@ func generateFrames(frameChan chan<- Frame, track *Track, args *Arguments, total
 			pngBuffer := new(bytes.Buffer)
 
 			for frameNum := range tasks {
-				img := renderFrame(frameNum, totalFrames, track, args, font)
+				img := renderFrame(frameNum, totalFrames, track, args, font, segmentStartTime)
 
 				pngBuffer.Reset()
 				err := png.Encode(pngBuffer, img)
@@ -75,8 +75,14 @@ func runVideoPipeline(track *Track, args *Arguments, font *truetype.Font) {
 	// --- Concurrency Setup ---
 	var wg sync.WaitGroup
 	frameChan := make(chan Frame, int(args.Framerate)*2)
-	totalDuration := track.Points[len(track.Points)-1].Timestamp.Sub(track.Points[0].Timestamp)
-	totalFrames := int(totalDuration.Seconds() * args.Framerate)
+
+	if track.RenderToIndex == 0 {
+		track.RenderToIndex = len(track.SmoothedPoints)
+	}
+
+	segmentDuration := track.SmoothedPoints[track.RenderToIndex-1].Timestamp.Sub(track.SmoothedPoints[track.RenderFromIndex].Timestamp)
+	totalFrames := int(segmentDuration.Seconds() * args.Framerate)
+	segmentStartTime := track.SmoothedPoints[track.RenderFromIndex].Timestamp
 
 	// --- Encoder Goroutine (with reordering and timeout) ---
 	wg.Add(1)
@@ -128,7 +134,7 @@ func runVideoPipeline(track *Track, args *Arguments, font *truetype.Font) {
 	}()
 
 	// --- Frame Generation ---
-	generateFrames(frameChan, track, args, totalFrames, font)
+	generateFrames(frameChan, track, args, totalFrames, font, segmentStartTime)
 	close(frameChan)
 
 	wg.Wait()

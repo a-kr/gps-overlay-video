@@ -32,6 +32,8 @@ type Arguments struct {
 	Debug               bool
 	DynMapScale         bool
 	TrackAdjustmentFile string
+	From                string
+	To                  string
 }
 
 // --- Argument Parsing ---
@@ -50,13 +52,16 @@ func parseArguments() *Arguments {
 	flag.IntVar(&args.WidgetSize, "widget-size", 600, "Map widget diameter in pixels.")
 	pathWidth := flag.Float64("path-width", 10, "Width of the drawn path.")
 	flag.StringVar(&pathColorStr, "path-color", "#FF0000", "Color of the drawn path (hex).")
-	flag.StringVar(&borderColorStr, "border-color", "#ff9800", "Color of the map border (hex).")
+	flag.StringVar(&borderColorStr, "border-color", "#A14F00", "Color of the map border (hex).")
 	flag.StringVar(&indicatorColorStr, "indicator-color", "#FFFFFF", "Color of the text indicators (hex).")
 	flag.BoolVar(&args.RenderFirstFrame, "render-first-frame", false, "Render only the first frame and save as first_frame.png.")
 	flag.BoolVar(&args.Is2x, "2x", true, "Use 2x tiles.")
 	flag.BoolVar(&args.Debug, "debug", false, "Debug slope calculation.")
 	flag.BoolVar(&args.DynMapScale, "dyn-map-scale", false, "Enable dynamic map scaling based on speed.")
 	flag.StringVar(&args.TrackAdjustmentFile, "track-adjustment-file", "", "File with track adjustment specifications.")
+
+	flag.StringVar(&args.From, "from", "0s", "Start of the track fragment to render. Can be in seconds (e.g., 500s) or kilometers (e.g., 17.5km).")
+	flag.StringVar(&args.To, "to", "36000s", "End of the track fragment to render. Can be in seconds (e.g., 500s) or kilometers (e.g., 17.5km).")
 
 	fmt.Println(os.Args)
 	flag.Parse()

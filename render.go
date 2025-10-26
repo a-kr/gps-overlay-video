@@ -44,12 +44,11 @@ func drawSlopeIcon(dc *gg.Context, x, y, size, lineWidth float64) {
 	dc.Pop()
 }
 
-func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font *truetype.Font) image.Image {
-	startTime := track.Points[0].Timestamp
+func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font *truetype.Font, segmentStartTime time.Time) image.Image {
 	timeOffset := float64(frameNum) / args.Framerate
-	currentPoint := findPointForTime(timeOffset, startTime, track.SmoothedPoints)
+	currentPoint := findPointForTime(timeOffset, segmentStartTime, track.SmoothedPoints)
 	fiveSecondIntervalStartOffset := math.Floor(timeOffset/5.0) * 5.0
-	slopeDisplayPoint := findPointForTime(fiveSecondIntervalStartOffset, startTime, track.SmoothedPoints)
+	slopeDisplayPoint := findPointForTime(fiveSecondIntervalStartOffset, segmentStartTime, track.SmoothedPoints)
 
 	// --- Calculations ---
 	pathSoFar := []Point{}
@@ -230,10 +229,17 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	widgetCenterX := mapPosX + widgetRadiusPx
 	widgetCenterY := mapPosY + widgetRadiusPx
 
+	// тёмная кайма внутри границы
+	frameDC.SetLineWidth(2)
+	frameDC.SetColor(color.RGBA{R: 0, G: 0, B: 0, A: 80})
+	frameDC.DrawCircle(widgetCenterX, widgetCenterY, widgetRadiusPx - borderWidth/2)
+	frameDC.Stroke()
+
 	// Set clip for path
 	frameDC.Push()
-	frameDC.DrawCircle(widgetCenterX, widgetCenterY, widgetRadiusPx)
+	frameDC.DrawCircle(widgetCenterX, widgetCenterY, widgetRadiusPx - borderWidth/2 - 1)
 	frameDC.Clip()
+
 
 	if len(pathSoFar) > 1 {
 		current_world_px, current_world_py := deg2num(currentPoint.Lat, currentPoint.Lon, adjustedMapZoom)

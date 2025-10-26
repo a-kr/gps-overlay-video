@@ -24,6 +24,8 @@ type Track struct {
 	Points         []Point
 	SmoothedPoints []Point
 	TotalDistance  float64
+	RenderFromIndex int
+	RenderToIndex   int
 }
 
 type TrackAdjustmentSpec struct {
@@ -468,4 +470,45 @@ func haversine(p1, p2 Point) float64 {
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 
 	return R * c
+}
+
+func parseCutBoundary(boundary string, points []Point) int {
+	if len(points) == 0 {
+		return 0
+	}
+	if strings.HasSuffix(boundary, "s") {
+		seconds, err := strconv.ParseFloat(strings.TrimSuffix(boundary, "s"), 64)
+		if err != nil {
+			return 0
+		}
+		startTime := points[0].Timestamp
+		for i, p := range points {
+			if p.Timestamp.Sub(startTime).Seconds() >= seconds {
+				return i
+			}
+		}
+		return len(points)
+	} else if strings.HasSuffix(boundary, "km") {
+		km, err := strconv.ParseFloat(strings.TrimSuffix(boundary, "km"), 64)
+		if err != nil {
+			return 0
+		}
+		for i, p := range points {
+			if p.Distance >= km {
+				return i
+			}
+		}
+		return len(points)
+	}
+	return 0
+}
+
+func cutTrack(track *Track, from, to string) {
+	track.RenderFromIndex = parseCutBoundary(from, track.SmoothedPoints)
+	track.RenderToIndex = parseCutBoundary(to, track.SmoothedPoints)
+
+	if track.RenderFromIndex >= track.RenderToIndex {
+		track.RenderFromIndex = 0
+		track.RenderToIndex = 0
+	}
 }
