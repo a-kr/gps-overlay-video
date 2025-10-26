@@ -258,6 +258,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 		}
 	}
 	frameDC.Pop() // Reset clip
+	frameDC.ResetClip()
 
 	// Current position marker
 	frameDC.SetColor(color.RGBA{0, 0, 255, 255})
@@ -303,8 +304,8 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	// Slope Indicator
 	slopeBlockX := mapPosX + widgetWidth*2/3
 	slopeBlockWidth := widgetWidth / 3.0
-	slopeIconX := slopeBlockX + iconSize/2
-	slopeIconY := row1Y - 1.15*valueFontSize
+	slopeIconX := slopeBlockX + 2 * iconSize
+	slopeIconY := row1Y - 1.35*valueFontSize
 	drawSlopeIcon(frameDC, slopeIconX, slopeIconY, iconSize, iconLineWidth)
 	slopeValueText := fmt.Sprintf("%.1f", slope)
 	slopeUnitText := " %"
