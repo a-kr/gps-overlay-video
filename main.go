@@ -297,7 +297,7 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		// Find the start point for our -25m slope calculation window
 		p_start_idx := -1
 		for j := i; j >= 0; j-- {
-			if (smoothed[i].Distance - smoothed[j].Distance) * 1000 >= 25 {
+			if math.Abs(smoothed[i].Distance - smoothed[j].Distance) * 1000 >= 25 {
 				p_start_idx = j
 				break
 			}
@@ -306,7 +306,7 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		// Find the end point for our +25m slope calculation window
 		p_end_idx := -1
 		for j := i; j < len(smoothed); j++ {
-			if (smoothed[j].Distance - smoothed[i].Distance) * 1000 >= 25 {
+			if math.Abs(smoothed[j].Distance - smoothed[i].Distance) * 1000 >= 25 {
 				p_end_idx = j
 				break
 			}
