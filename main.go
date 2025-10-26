@@ -1172,6 +1172,10 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 			if timeDiff < 2.0 { // между точками малый интервал
 				derivedCalcRatio = 0
 			}
+			p2ResidualMapScale := p2.ResidualMapScale
+			if p1.TileZoom != p2.TileZoom {
+				p2ResidualMapScale = p2.ResidualMapScale * math.Pow(2, float64(p1.TileZoom-p2.TileZoom))
+			}
 			return Point{
 				Lat:              p1.Lat + (p2.Lat-p1.Lat)*ratio,
 				Lon:              p1.Lon + (p2.Lon-p1.Lon)*ratio,
@@ -1184,7 +1188,7 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 				MapScale:         p1.MapScale + (p2.MapScale-p1.MapScale)*ratio,
 				Timestamp:        targetTime,
 				TileZoom:         p1.TileZoom,
-				ResidualMapScale: p1.ResidualMapScale + (p2.ResidualMapScale-p1.ResidualMapScale)*ratio,
+				ResidualMapScale: p1.ResidualMapScale + (p2ResidualMapScale-p1.ResidualMapScale)*ratio,
 			}
 		}
 	}
