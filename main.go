@@ -818,7 +818,11 @@ func prefetchTiles(track *Track, args *Arguments) {
 
 	for _, p := range track.SmoothedPoints {
 		widgetRadiusPx := float64(args.WidgetSize) / 2.0
-		effectiveWidgetRadiusPx := widgetRadiusPx * p.MapScale
+
+		zoomOutLevels := int(math.Floor(math.Log2(p.MapScale)))
+		residualMapScale := p.MapScale / math.Pow(2, float64(zoomOutLevels))
+
+		effectiveWidgetRadiusPx := widgetRadiusPx * residualMapScale
 		adjustedMapZoom := getAdjustedMapZoom(args.MapZoom, p.MapScale)
 
 		worldPx, worldPy := deg2num(p.Lat, p.Lon, adjustedMapZoom)
@@ -953,10 +957,12 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	// --- Dynamic Map Scale Calculation ---
 	mapScale := currentPoint.MapScale
 	adjustedMapZoom := getAdjustedMapZoom(args.MapZoom, mapScale)
+	zoomOutLevels := int(math.Floor(math.Log2(mapScale)))
+	residualMapScale := mapScale / math.Pow(2, float64(zoomOutLevels))
 
 	// --- Map Rendering ---
 	widgetRadiusPx := float64(args.WidgetSize) / 2.0
-	effectiveWidgetRadiusPx := widgetRadiusPx * mapScale
+	effectiveWidgetRadiusPx := widgetRadiusPx * residualMapScale
 	worldPx, worldPy := deg2num(currentPoint.Lat, currentPoint.Lon, adjustedMapZoom)
 	worldPx *= float64(args.TileSize)
 	worldPy *= float64(args.TileSize)
@@ -1018,11 +1024,9 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	mask.Clip()
 
 	// Apply dynamic scaling
-	if args.DynMapScale && mapScale != 1.0 {
-		zoomOutLevels := int(math.Floor(math.Log2(mapScale)))
-		residualMapScale := mapScale / math.Pow(2, float64(zoomOutLevels))
+	if mapScale != 1.0 {
 		mask.Translate(widgetRadiusPx, widgetRadiusPx)
-		if math.Abs(residualMapScale - 1.0) < 0.01 {
+		if math.Abs(residualMapScale - 1.0) > 0.01 {
 			mask.Scale(1/residualMapScale, 1/residualMapScale)
 		}
 		mask.Translate(-widgetRadiusPx, -widgetRadiusPx)
