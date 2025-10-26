@@ -828,7 +828,9 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 		zoomOutLevels := int(math.Floor(math.Log2(mapScale)))
 		residualMapScale := mapScale / math.Pow(2, float64(zoomOutLevels))
 		mask.Translate(widgetRadiusPx, widgetRadiusPx)
-		mask.Scale(1/residualMapScale, 1/residualMapScale)
+		if math.Abs(residualMapScale - 1.0) < 0.01 {
+			mask.Scale(1/residualMapScale, 1/residualMapScale)
+		}
 		mask.Translate(-widgetRadiusPx, -widgetRadiusPx)
 	}
 
