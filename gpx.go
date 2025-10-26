@@ -15,7 +15,7 @@ import (
 // --- Structs ---
 
 type Point struct {
-	Lat, Lon, Ele, Speed, Slope, Distance, SmoothedSlope, AvgSpeed, MapScale, ResidualMapScale float64
+	Lat, Lon, Ele, Speed, Slope, Distance, SmoothedSlope, AvgSpeed, MapScale, ResidualMapScale, Bearing float64
 	Timestamp      time.Time
 	TileZoom       int
 }
@@ -363,6 +363,13 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		smoothed[i].MapScale = speedMapScale
 	}
 
+	for i := 0; i < len(smoothed)-1; i++ {
+		smoothed[i].Bearing = bearing(smoothed[i], smoothed[i+1])
+	}
+	if len(smoothed) > 1 {
+		smoothed[len(smoothed)-1].Bearing = smoothed[len(smoothed)-2].Bearing
+	}
+
 	// --- Track Adjustments ---
 	adjSpecs, err := parseTrackAdjustmentFile(args.TrackAdjustmentFile)
 	if err != nil {
@@ -470,6 +477,22 @@ func haversine(p1, p2 Point) float64 {
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 
 	return R * c
+}
+
+func bearing(p1, p2 Point) float64 {
+	lat1 := p1.Lat * math.Pi / 180
+	lon1 := p1.Lon * math.Pi / 180
+	lat2 := p2.Lat * math.Pi / 180
+	lon2 := p2.Lon * math.Pi / 180
+
+	dLon := lon2 - lon1
+
+	y := math.Sin(dLon) * math.Cos(lat2)
+	x := math.Cos(lat1)*math.Sin(lat2) - math.Sin(lat1)*math.Cos(lat2)*math.Cos(dLon)
+
+	bearing := math.Atan2(y, x)
+
+	return bearing // in radians
 }
 
 func parseCutBoundary(boundary string, points []Point) int {

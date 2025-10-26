@@ -232,7 +232,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	widgetCenterY := mapPosY + widgetRadiusPx
 
 	// тёмная кайма внутри границы
-	frameDC.SetLineWidth(2)
+	frameDC.SetLineWidth(4)
 	frameDC.SetColor(color.RGBA{R: 0, G: 0, B: 0, A: 80})
 	frameDC.DrawCircle(widgetCenterX, widgetCenterY, widgetRadiusPx - borderWidth/2)
 	frameDC.Stroke()
@@ -269,13 +269,30 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	frameDC.ResetClip()
 
 	// Current position marker
-	frameDC.SetColor(color.RGBA{0, 0, 255, 255})
-	frameDC.DrawPoint(widgetCenterX, widgetCenterY, 8)
-	frameDC.Fill()
+	bearing := currentPoint.Bearing
+	radius := 8.0
+
+	frameDC.Push()
+	frameDC.Translate(widgetCenterX, widgetCenterY)
+	frameDC.Rotate(bearing - math.Pi/2.0)
+
+	// Drop path
+	frameDC.MoveTo(radius * 2, 0)
+	ang := 50.0
+	frameDC.LineTo(radius * math.Cos(gg.Radians(ang)), radius * math.Sin(gg.Radians(ang)))
+	frameDC.DrawArc(0, 0, radius, gg.Radians(45), gg.Radians(315))
+	frameDC.ClosePath()
+
+	// White outline
 	frameDC.SetColor(color.White)
-	frameDC.SetLineWidth(2)
-	frameDC.DrawPoint(widgetCenterX, widgetCenterY, 8)
-	frameDC.Stroke()
+	frameDC.SetLineWidth(4) // 2px inside, 2px outside
+	frameDC.StrokePreserve()
+
+	// Blue fill
+	frameDC.SetColor(color.RGBA{0, 0, 255, 255})
+	frameDC.Fill()
+
+	frameDC.Pop()
 
 	// --- Indicators ---
 	widgetWidth := float64(args.WidgetSize)
@@ -377,6 +394,7 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 				Timestamp:        targetTime,
 				TileZoom:         p1.TileZoom,
 				ResidualMapScale: p1.ResidualMapScale + (p2ResidualMapScale-p1.ResidualMapScale)*ratio,
+				Bearing:          p1.Bearing + (p2.Bearing-p1.Bearing)*ratio,
 			}
 		}
 	}
