@@ -388,6 +388,20 @@ func deg2num(lat, lon float64, zoom int) (float64, float64) {
 	return xtile, ytile
 }
 
+func getAdjustedMapZoom(originalMapZoom int, mapScale float64) int {
+	if mapScale < 1.0 {
+		return originalMapZoom // Should not happen with current logic, but for safety
+	}
+
+	zoomOutLevels := int(math.Floor(math.Log2(mapScale)))
+	adjustedZoom := originalMapZoom - zoomOutLevels
+
+	if adjustedZoom < 0 {
+		return 0 // Prevent zoom level from going below 0
+	}
+	return adjustedZoom
+}
+
 // --- Tile Downloading & Caching ---
 
 var tileCache sync.Map // Concurrent map for caching tiles
@@ -611,8 +625,9 @@ func prefetchTiles(track *Track, args *Arguments) {
 	for _, p := range track.SmoothedPoints {
 		widgetRadiusPx := float64(args.WidgetSize) / 2.0
 		effectiveWidgetRadiusPx := widgetRadiusPx * p.MapScale
+		adjustedMapZoom := getAdjustedMapZoom(args.MapZoom, p.MapScale)
 
-		worldPx, worldPy := deg2num(p.Lat, p.Lon, args.MapZoom)
+		worldPx, worldPy := deg2num(p.Lat, p.Lon, adjustedMapZoom)
 		worldPx *= float64(args.TileSize)
 		worldPy *= float64(args.TileSize)
 
@@ -628,7 +643,7 @@ func prefetchTiles(track *Track, args *Arguments) {
 
 		for x := int(tx_min); x <= int(tx_max); x++ {
 			for y := int(ty_min); y <= int(ty_max); y++ {
-				tileCoords[Tile{X: x, Y: y, Z: args.MapZoom}] = struct{}{}
+				tileCoords[Tile{X: x, Y: y, Z: adjustedMapZoom}] = struct{}{}
 			}
 		}
 	}
@@ -743,11 +758,12 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 
 	// --- Dynamic Map Scale Calculation ---
 	mapScale := currentPoint.MapScale
+	adjustedMapZoom := getAdjustedMapZoom(args.MapZoom, mapScale)
 
 	// --- Map Rendering ---
 	widgetRadiusPx := float64(args.WidgetSize) / 2.0
 	effectiveWidgetRadiusPx := widgetRadiusPx * mapScale
-	worldPx, worldPy := deg2num(currentPoint.Lat, currentPoint.Lon, args.MapZoom)
+	worldPx, worldPy := deg2num(currentPoint.Lat, currentPoint.Lon, adjustedMapZoom)
 	worldPx *= float64(args.TileSize)
 	worldPy *= float64(args.TileSize)
 
@@ -768,7 +784,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 
 	for x := int(tx_min); x <= int(tx_max); x++ {
 		for y := int(ty_min); y <= int(ty_max); y++ {
-			tileImg, err := getTileImage(args.MapStyle, args.MapZoom, x, y, args)
+				tileImg, err := getTileImage(args.MapStyle, adjustedMapZoom, x, y, args)
 			if err != nil {
 				log.Printf("could not get tile image: %v", err)
 			}
@@ -786,8 +802,8 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 		mapDC.SetColor(args.PathColor)
 		mapDC.SetLineWidth(args.PathWidth)
 		for i := 1; i < len(pathSoFar); i++ {
-			p1x, p1y := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, args.MapZoom)
-			p2x, p2y := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, args.MapZoom)
+			p1x, p1y := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, adjustedMapZoom)
+			p2x, p2y := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, adjustedMapZoom)
 			mapDC.DrawLine((p1x-tx_min)*float64(args.TileSize), (p1y-ty_min)*float64(args.TileSize), (p2x-tx_min)*float64(args.TileSize), (p2y-ty_min)*float64(args.TileSize))
 			mapDC.Stroke()
 		}
