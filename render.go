@@ -394,10 +394,20 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 				Timestamp:        targetTime,
 				TileZoom:         p1.TileZoom,
 				ResidualMapScale: p1.ResidualMapScale + (p2ResidualMapScale-p1.ResidualMapScale)*ratio,
-				Bearing:          p1.Bearing + (p2.Bearing-p1.Bearing)*ratio,
+				Bearing:          interpolateBearing(p1.Bearing, p2.Bearing, ratio),
 			}
 		}
 	}
 	return points[len(points)-1]
+}
+
+func interpolateBearing(b1, b2, ratio float64) float64 {
+	diff := b2 - b1
+	if diff > math.Pi {
+		diff -= 2 * math.Pi
+	} else if diff < -math.Pi {
+		diff += 2 * math.Pi
+	}
+	return b1 + diff*ratio
 }
 

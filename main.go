@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"github.com/fogleman/gg"
@@ -45,7 +46,7 @@ func main() {
 	if args.Debug {
 		for i := 1; i < len(track.SmoothedPoints); i++ {
 			p := track.SmoothedPoints[i]
-			fmt.Printf("Point %d: Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%, TileZoom: %d, ResidualMapScale: %.2f\n", i, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope, p.TileZoom, p.ResidualMapScale)
+			fmt.Printf("Point %d: Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%, TileZoom: %d, ResidualMapScale: %.2f, Bearing: %.2f degrees\n", i, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope, p.TileZoom, p.ResidualMapScale, p.Bearing * 180 / math.Pi)
 		}
 		return
 	}

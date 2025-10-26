@@ -369,6 +369,22 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 	if len(smoothed) > 1 {
 		smoothed[len(smoothed)-1].Bearing = smoothed[len(smoothed)-2].Bearing
 	}
+	// сглаживаем резкие прыжки bearing
+	newBearings := make([]float64, len(smoothed))
+	newBearings[0] = smoothed[0].Bearing
+	for i := 1; i < len(smoothed)-1; i++ {
+		b0 := smoothed[i-1].Bearing
+		b1 := smoothed[i].Bearing
+		if angleBetweenBearings(b0, b1) <= math.Pi/4 {
+			newBearings[i] = b1
+		} else { // too sharp a turn, keep the previous bearing until things calm down
+			newBearings[i] = newBearings[i-1]
+		}
+	}
+	for i := 1; i < len(smoothed)-1; i++ {
+		smoothed[i].Bearing = newBearings[i]
+	}
+	// закончили сглаживать резкие прыжки bearing
 
 	// --- Track Adjustments ---
 	adjSpecs, err := parseTrackAdjustmentFile(args.TrackAdjustmentFile)
@@ -493,6 +509,12 @@ func bearing(p1, p2 Point) float64 {
 	bearing := math.Atan2(y, x)
 
 	return bearing // in radians
+}
+
+func angleBetweenBearings(bearing1, bearing2 float64) float64 {
+	diff := bearing2 - bearing1
+	diff = math.Mod(diff+math.Pi, 2*math.Pi) - math.Pi // Normalize to [-π, π]
+	return math.Abs(diff)
 }
 
 func parseCutBoundary(boundary string, points []Point) int {
