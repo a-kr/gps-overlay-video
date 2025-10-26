@@ -74,8 +74,9 @@ type Frame struct {
 }
 
 type Point struct {
-	Lat, Lon, Ele, Speed, Slope, Distance, SmoothedSlope, AvgSpeed, MapScale float64
-	Timestamp time.Time
+	Lat, Lon, Ele, Speed, Slope, Distance, SmoothedSlope, AvgSpeed, MapScale, ResidualMapScale float64
+	Timestamp      time.Time
+	TileZoom       int
 }
 
 type Tile struct {
@@ -569,6 +570,20 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		}
 	}
 
+	// --- Pre-calculate Zoom and Scale ---
+	for i := range smoothed {
+		p := &smoothed[i]
+		zoomOutLevels := 0.0
+		if p.MapScale > 1.0 {
+			zoomOutLevels = math.Floor(math.Log2(p.MapScale))
+		}
+		p.TileZoom = args.MapZoom - int(zoomOutLevels)
+		if p.TileZoom < 0 {
+			p.TileZoom = 0
+		}
+		p.ResidualMapScale = p.MapScale / math.Pow(2, zoomOutLevels)
+	}
+
 	return smoothed
 }
 
@@ -709,7 +724,7 @@ func main() {
 		for i := 1; i < len(track.SmoothedPoints); i++ {
 			p := track.SmoothedPoints[i]
 			
-			fmt.Printf("Point %d: Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%\n", i, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope)
+			fmt.Printf("Point %d: Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%, TileZoom: %d, ResidualMapScale: %.2f\n", i, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope, p.TileZoom, p.ResidualMapScale)
 		}
 		return
 	}
@@ -819,11 +834,9 @@ func prefetchTiles(track *Track, args *Arguments) {
 	for _, p := range track.SmoothedPoints {
 		widgetRadiusPx := float64(args.WidgetSize) / 2.0
 
-		zoomOutLevels := int(math.Floor(math.Log2(p.MapScale)))
-		residualMapScale := p.MapScale / math.Pow(2, float64(zoomOutLevels))
-
+		adjustedMapZoom := p.TileZoom
+		residualMapScale := p.ResidualMapScale
 		effectiveWidgetRadiusPx := widgetRadiusPx * residualMapScale
-		adjustedMapZoom := getAdjustedMapZoom(args.MapZoom, p.MapScale)
 
 		worldPx, worldPy := deg2num(p.Lat, p.Lon, adjustedMapZoom)
 		worldPx *= float64(args.TileSize)
@@ -955,10 +968,8 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	currentDistance := currentPoint.Distance
 
 	// --- Dynamic Map Scale Calculation ---
-	mapScale := currentPoint.MapScale
-	adjustedMapZoom := getAdjustedMapZoom(args.MapZoom, mapScale)
-	zoomOutLevels := int(math.Floor(math.Log2(mapScale)))
-	residualMapScale := mapScale / math.Pow(2, float64(zoomOutLevels))
+	adjustedMapZoom := currentPoint.TileZoom
+	residualMapScale := currentPoint.ResidualMapScale
 
 	// --- Map Rendering ---
 	widgetRadiusPx := float64(args.WidgetSize) / 2.0
@@ -1024,7 +1035,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	mask.Clip()
 
 	// Apply dynamic scaling
-	if mapScale != 1.0 {
+	if currentPoint.MapScale != 1.0 {
 		mask.Translate(widgetRadiusPx, widgetRadiusPx)
 		if math.Abs(residualMapScale - 1.0) > 0.01 {
 			mask.Scale(1/residualMapScale, 1/residualMapScale)
@@ -1162,16 +1173,18 @@ func findPointForTime(offset float64, startTime time.Time, points []Point) Point
 				derivedCalcRatio = 0
 			}
 			return Point{
-				Lat:           p1.Lat + (p2.Lat-p1.Lat)*ratio,
-				Lon:           p1.Lon + (p2.Lon-p1.Lon)*ratio,
-				Ele:           p1.Ele + (p2.Ele-p1.Ele)*ratio,
-				Speed:         p1.Speed + (p2.Speed-p1.Speed)*derivedCalcRatio,
-				AvgSpeed:      p1.AvgSpeed + (p2.AvgSpeed-p1.AvgSpeed)*derivedCalcRatio,
-				Slope:         p1.Slope + (p2.Slope-p1.Slope)*derivedCalcRatio,
-				SmoothedSlope: p1.SmoothedSlope + (p2.SmoothedSlope-p1.SmoothedSlope)*derivedCalcRatio,
-				Distance:      p1.Distance + (p2.Distance-p1.Distance)*derivedCalcRatio,
-				MapScale:      p1.MapScale + (p2.MapScale-p1.MapScale)*ratio,
-				Timestamp:     targetTime,
+				Lat:              p1.Lat + (p2.Lat-p1.Lat)*ratio,
+				Lon:              p1.Lon + (p2.Lon-p1.Lon)*ratio,
+				Ele:              p1.Ele + (p2.Ele-p1.Ele)*ratio,
+				Speed:            p1.Speed + (p2.Speed-p1.Speed)*derivedCalcRatio,
+				AvgSpeed:         p1.AvgSpeed + (p2.AvgSpeed-p1.AvgSpeed)*derivedCalcRatio,
+				Slope:            p1.Slope + (p2.Slope-p1.Slope)*derivedCalcRatio,
+				SmoothedSlope:    p1.SmoothedSlope + (p2.SmoothedSlope-p1.SmoothedSlope)*derivedCalcRatio,
+				Distance:         p1.Distance + (p2.Distance-p1.Distance)*derivedCalcRatio,
+				MapScale:         p1.MapScale + (p2.MapScale-p1.MapScale)*ratio,
+				Timestamp:        targetTime,
+				TileZoom:         p1.TileZoom,
+				ResidualMapScale: p1.ResidualMapScale + (p2.ResidualMapScale-p1.ResidualMapScale)*ratio,
 			}
 		}
 	}
