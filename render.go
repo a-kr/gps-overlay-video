@@ -53,7 +53,7 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	// --- Calculations ---
 	pathSoFar := []Point{}
 	// Calculate the timestamp after which the path should be drawn
-	skipUntilTimestamp := segmentStartTime.Add(time.Duration(args.SkipPathSeconds * float64(time.Second)))
+	skipUntilTimestamp := track.SmoothedPoints[0].Timestamp.Add(time.Duration(args.SkipPathSeconds * float64(time.Second)))
 
 	for i := 0; i < len(track.Points) && track.Points[i].Timestamp.Before(currentPoint.Timestamp); i++ {
 		// Only add points to pathSoFar if their timestamp is after the skipUntilTimestamp
@@ -129,6 +129,10 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 		if len(pathSoFar) > 1 {
 			mapDC.SetColor(args.PathColor)
 			mapDC.SetLineWidth(args.PathWidth)
+
+			prevX := math.NaN()
+			prevY := math.NaN()
+
 			for i := 1; i < len(pathSoFar); i++ {
 				p1x, p1y := deg2num(pathSoFar[i-1].Lat, pathSoFar[i-1].Lon, adjustedMapZoom)
 				p2x, p2y := deg2num(pathSoFar[i].Lat, pathSoFar[i].Lon, adjustedMapZoom)
@@ -136,6 +140,20 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 				sp1y := (p1y*float64(args.TileSize) - ty_min*float64(args.TileSize)) * scalingFactor
 				sp2x := (p2x*float64(args.TileSize) - tx_min*float64(args.TileSize)) * scalingFactor
 				sp2y := (p2y*float64(args.TileSize) - ty_min*float64(args.TileSize)) * scalingFactor
+
+				if !math.IsNaN(prevX) {
+					sp1x = prevX
+					sp1y = prevY
+					prevX = math.NaN()
+					prevY = math.NaN()
+				}
+				if math.Abs(sp1x-sp2x) < 1.0 && math.Abs(sp1y - sp2y) < 1.0 { // линия сливается в точку
+					// рисовать смысла нет.
+					// сохраним начало линии до следующей итерации, и нарисуем, когда линия удлинится
+					prevX = sp1x
+					prevY = sp1y
+					continue
+				}
 				mapDC.DrawLine(sp1x, sp1y, sp2x, sp2y)
 				mapDC.Stroke()
 			}
