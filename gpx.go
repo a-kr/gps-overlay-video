@@ -42,6 +42,7 @@ type ScaleChange struct {
 
 // --- GPX Parsing & Processing ---
 
+// smoothGpxPoints фиксит две "слипшиеся" точки трека, переставляя вторую на полпути к третьей точке
 func smoothGpxPoints(points []Point) {
 	if len(points) < 3 {
 		return
@@ -322,7 +323,12 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 			totalTime += smoothed[j+1].Timestamp.Sub(smoothed[j].Timestamp).Seconds()
 		}
 		if totalTime > 0 {
-			smoothed[i].Speed = (totalDist * 3600) / totalTime
+			spd := (totalDist * 3600) / totalTime
+			if spd > 36.0 && smoothed[i-1].Speed < 30.0 {
+				// чёт подозрительно
+				spd = smoothed[i-1].Speed
+			}
+			smoothed[i].Speed = spd
 		} else if i > 0 {
 			smoothed[i].Speed = smoothed[i-1].Speed
 		} else {
