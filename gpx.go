@@ -312,6 +312,7 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		}
 	}
 
+
 	// --- Moving Average Speed Calculation (30s window) ---
 	if len(smoothed) > 0 {
 		left, right := 0, 0

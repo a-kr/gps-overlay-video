@@ -120,10 +120,6 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 		return nil, err
 	}
 
-	if args.MapBrightness != 0 || args.MapContrast != 1 {
-		img = adjustBrightnessContrast(img, args.MapBrightness, args.MapContrast)
-	}
-
 	if args.Is2x && (img.Bounds().Dx() != 512 || img.Bounds().Dy() != 512) {
 		return nil, fmt.Errorf("style %s does not support 2x: downloaded tile is %dx%d", style, img.Bounds().Dx(), img.Bounds().Dy())
 	}
@@ -141,6 +137,10 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 		return nil, err
 	}
 	out.Write(buf.Bytes())
+
+	if args.MapBrightness != 0 || args.MapContrast != 1 {
+		img = adjustBrightnessContrast(img, args.MapBrightness, args.MapContrast)
+	}
 
 	tileCache.Store(tilePath, img)
 	return img, nil

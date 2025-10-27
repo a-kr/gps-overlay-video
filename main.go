@@ -44,9 +44,15 @@ func main() {
 	cutTrack(track, args.From, args.To)
 
 	if args.Debug {
-		for i := 1; i < len(track.SmoothedPoints); i++ {
+		t0 := track.Points[0].Timestamp
+		for i := track.RenderFromIndex; i < track.RenderToIndex; i++ {
 			p := track.SmoothedPoints[i]
-			fmt.Printf("Point %d: Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%, TileZoom: %d, ResidualMapScale: %.2f, Bearing: %.2f degrees\n", i, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope, p.TileZoom, p.ResidualMapScale, p.Bearing * 180 / math.Pi)
+			ddist := 0.0
+			if i > 0 {
+				ddist = p.Distance - track.SmoothedPoints[i-1].Distance
+			}
+			fmt.Printf("Point %d: Time %v, Dist %.2f km, dDist %.4f km, Speed: %.2f km/h, AvgSpeed: %.2f km/h, MapScale: %.2f, Slope: %.2f%%, SmoothedSlope: %.2f%%, TileZoom: %d, ResidualMapScale: %.2f, Bearing: %.2f degrees\n", 
+				i, p.Timestamp.Sub(t0), p.Distance, ddist, p.Speed, p.AvgSpeed, p.MapScale, p.Slope, p.SmoothedSlope, p.TileZoom, p.ResidualMapScale, p.Bearing * 180 / math.Pi)
 		}
 		return
 	}
