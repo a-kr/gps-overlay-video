@@ -42,6 +42,22 @@ type ScaleChange struct {
 
 // --- GPX Parsing & Processing ---
 
+func smoothGpxPoints(points []Point) {
+	if len(points) < 3 {
+		return
+	}
+
+	for i := 1; i < len(points)-1; i++ {
+		// if a point has the same coordinates as the previous one
+		if points[i].Lat == points[i-1].Lat && points[i].Lon == points[i-1].Lon {
+			// move it to the middle of the previous and next points
+			points[i].Lat = points[i-1].Lat + (points[i+1].Lat-points[i-1].Lat)/2
+			points[i].Lon = points[i-1].Lon + (points[i+1].Lon-points[i-1].Lon)/2
+			points[i].Ele = points[i-1].Ele + (points[i+1].Ele-points[i-1].Ele)/2
+		}
+	}
+}
+
 func parseGpx(filePath string) ([]Point, error) {
 	gpxFile, err := gpx.ParseFile(filePath)
 	if err != nil {
@@ -87,6 +103,8 @@ func parseGpx(filePath string) ([]Point, error) {
 			points[i].Ele = lastEle
 		}
 	}
+
+	smoothGpxPoints(points)
 
 	return points, nil
 }
