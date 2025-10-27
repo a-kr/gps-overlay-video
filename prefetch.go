@@ -245,6 +245,11 @@ func cacheScaledTiles(uniqueScales map[float64]struct{}, allTiles map[Tile]struc
 		zoomOutLevels := 0.0
 		if scale > 1.0 {
 			zoomOutLevels = math.Floor(math.Log2(scale))
+		} else if scale < 1.0 {
+			zoomOutLevels = -1
+			if scale < 0.5 {
+				zoomOutLevels = -2
+			}
 		}
 		residualMapScale := scale / math.Pow(2, zoomOutLevels)
 		scaleKey := fmt.Sprintf("%.4f", residualMapScale)

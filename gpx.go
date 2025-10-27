@@ -29,12 +29,14 @@ type Track struct {
 }
 
 type TrackAdjustmentSpec struct {
+	Line      int
 	PointSpec string
 	Scale     float64
 	Duration  *time.Duration
 }
 
 type ScaleChange struct {
+	Line               int
 	PointIndex         int
 	TargetScale        float64
 	TransitionDuration time.Duration
@@ -125,6 +127,9 @@ func parseTrackAdjustmentFile(filePath string) ([]TrackAdjustmentSpec, error) {
 `)
 
 	for i, line := range lines {
+		if strings.Contains(line, "#") {
+			line = strings.SplitN(line, "#", 2)[0]
+		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -135,7 +140,7 @@ func parseTrackAdjustmentFile(filePath string) ([]TrackAdjustmentSpec, error) {
 			return nil, fmt.Errorf("invalid format on line %d: %s", i+1, line)
 		}
 
-		spec := TrackAdjustmentSpec{PointSpec: parts[0]}
+		spec := TrackAdjustmentSpec{Line: i + 1, PointSpec: parts[0]}
 		var scaleFound bool
 
 		for _, part := range parts[1:] {
@@ -167,6 +172,12 @@ func parseTrackAdjustmentFile(filePath string) ([]TrackAdjustmentSpec, error) {
 		specs = append(specs, spec)
 	}
 
+	//log.Printf("parsed adj file:")
+	//for _, sp := range specs {
+		//log.Printf("- %v", sp)
+	//}
+	//log.Printf("end of parsed adj file")
+
 	return specs, nil
 }
 
@@ -183,7 +194,6 @@ func applyTrackAdjustments(points []Point, specs []TrackAdjustmentSpec) ([]float
 	// --- Resolve specs to point indices ---
 	scaleChanges := make([]ScaleChange, 0)
 	lastDistance := 0.0
-	lastTime := 0.0
 	startTime := points[0].Timestamp
 
 	for _, spec := range specs {
@@ -220,12 +230,16 @@ func applyTrackAdjustments(points []Point, specs []TrackAdjustmentSpec) ([]float
 				return nil, fmt.Errorf("invalid time spec: %s", spec.PointSpec)
 			}
 
-			if strings.HasPrefix(spec.PointSpec, "+") {
-				timeOffset += lastTime
-			}
-			lastTime = timeOffset
+			var targetTime time.Time
 
-			targetTime := startTime.Add(time.Duration(timeOffset * float64(time.Second)))
+			if strings.HasPrefix(spec.PointSpec, "+") {
+				// время указано относительно предыдущей метки
+				prevPt := points[scaleChanges[len(scaleChanges)-1].PointIndex]
+				targetTime = prevPt.Timestamp.Add(time.Duration(timeOffset * float64(time.Second)))
+			} else {
+				targetTime = startTime.Add(time.Duration(timeOffset * float64(time.Second)))
+			}
+
 			for i, p := range points {
 				if !p.Timestamp.Before(targetTime) {
 					pointIndex = i
@@ -235,7 +249,7 @@ func applyTrackAdjustments(points []Point, specs []TrackAdjustmentSpec) ([]float
 		}
 
 		if pointIndex != -1 {
-			scaleChanges = append(scaleChanges, ScaleChange{PointIndex: pointIndex, TargetScale: spec.Scale, TransitionDuration: transitionDuration})
+			scaleChanges = append(scaleChanges, ScaleChange{Line: spec.Line, PointIndex: pointIndex, TargetScale: spec.Scale, TransitionDuration: transitionDuration})
 		} else {
 			log.Printf("Warning: could not find point for spec '%s'", spec.PointSpec)
 		}
@@ -262,6 +276,13 @@ func applyTrackAdjustments(points []Point, specs []TrackAdjustmentSpec) ([]float
 		transitionDuration := change.TransitionDuration
 		transitionStartIndex := change.PointIndex
 		transitionStartTime := points[transitionStartIndex].Timestamp
+
+		// fmt.Printf("Transition %d [%d] starts at %v dist %v  stays until %v  T.Sc. %v\n",
+		//     i, change.Line, transitionStartTime, 
+		// 	points[transitionStartIndex].Distance,
+		// 	transitionStartTime.Add(transitionDuration),
+		// 	change.TargetScale,
+		// )
 
 		for j := transitionStartIndex; j < len(points); j++ {
 			if i+1 < len(scaleChanges) && j >= scaleChanges[i+1].PointIndex {
@@ -493,6 +514,11 @@ func preprocessGpxPoints(points []Point, args *Arguments) []Point {
 		zoomOutLevels := 0.0
 		if p.MapScale > 1.0 {
 			zoomOutLevels = math.Floor(math.Log2(p.MapScale))
+		} else if p.MapScale < 1.0 {
+			zoomOutLevels = -1
+			if p.MapScale < 0.5 {
+				zoomOutLevels = -2
+			}
 		}
 		p.TileZoom = args.MapZoom - int(zoomOutLevels)
 		if p.TileZoom < 0 {
