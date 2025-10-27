@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fogleman/gg"
 	"github.com/schollz/progressbar/v3"
@@ -102,8 +103,14 @@ func getTileImage(style string, z, x, y int, args *Arguments) (image.Image, erro
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+	}
+	resp, err := client.Do(req)
 	if err != nil {
+		if os.IsTimeout(err) {
+			log.Fatalf("Tile download timed out after 3 seconds for %s: %v", url, err)
+		}
 		return nil, fmt.Errorf("failed to download tile %s: %w", url, err)
 	}
 	defer resp.Body.Close()
@@ -222,6 +229,7 @@ func prefetchTiles(allTiles map[Tile]struct{}, args *Arguments) {
 			getTileImage(args.MapStyle, t.Z, t.X, t.Y, args)
 			bar.Add(1)
 			<-limit
+			time.Sleep(time.Second / 20) // Rate limit to 20 tiles per second
 		}(tile)
 	}
 	wg.Wait()
