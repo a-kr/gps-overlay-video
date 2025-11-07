@@ -64,6 +64,14 @@ func renderFrame(frameNum, totalFrames int, track *Track, args *Arguments, font 
 	// Always add the current point, regardless of skip time, as it represents the current position
 	pathSoFar = append(pathSoFar, currentPoint)
 
+	if currentPoint.MapScale > 16 {
+		sparsePathSoFar := make([]Point, 0, len(pathSoFar))
+		for i := 0; i < len(pathSoFar); i += 15 {
+			sparsePathSoFar = append(sparsePathSoFar, pathSoFar[i])
+		}
+		pathSoFar = sparsePathSoFar
+	}
+
 	speed := currentPoint.Speed
 	slope := slopeDisplayPoint.SmoothedSlope
 	currentDistance := currentPoint.Distance
